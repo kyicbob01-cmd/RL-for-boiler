@@ -1,8 +1,3 @@
-"""
-Industrial SCADA HMI v2.0
-Siemens/Rockwell Style Interface
-"""
-
 import tkinter as tk
 from tkinter import ttk, messagebox
 import matplotlib.pyplot as plt
@@ -14,7 +9,14 @@ import time
 import torch
 import torch.nn as nn
 import os
+import sys
+
+# Add current directory to path to ensure imports work
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(current_dir)
+
 from train import RCPolicy
+from benchmark import BENCHMARK_SCENARIOS
 
 matplotlib.use('TkAgg')
 matplotlib.rcParams['font.family'] = ['Microsoft JhengHei', 'sans-serif']
@@ -24,6 +26,7 @@ try:
     windll.shcore.SetProcessDpiAwareness(1)
 except: pass
 
+# ... (Colors and Fonts remain the same) ...
 # Colors (Industrial Theme)
 C = {
     'bg_app': '#d4d4d4', 'bg_panel': '#e6e6e6', 'bg_content': '#ffffff',
@@ -45,14 +48,8 @@ F = {
     'tag': ("Segoe UI", 10),
 }
 
-# Scenarios (Traditional Chinese)
-SCENARIOS = {
-    "S1: 標準生產 (Standard)": [{'name': 'A', 'target': 150.0, 'duration': 90.0, 'weight': 300.0}, {'name': 'B', 'target': 90.0, 'duration': 500.0, 'weight': 100.0}, {'name': 'C', 'target': 100.0, 'duration': 150.0, 'weight': 900.0}],
-    "S2: 高溫作業 (High Temp)": [{'name': 'A', 'target': 100.0, 'duration': 150.0, 'weight': 600.0}, {'name': 'B', 'target': 150.0, 'duration': 300.0, 'weight': 1000.0}],
-    "S6: 重負載極限 (Heavy Load)": [{'name': 'BigTank', 'target': 150.0, 'duration': 300.0, 'weight': 2500.0}],
-    "S4: 大溫差衝突 (Conflict)": [{'name': 'Low', 'target': 80.0, 'duration': 100.0, 'weight': 400.0}, {'name': 'High', 'target': 180.0, 'duration': 250.0, 'weight': 1200.0}],
-    "S9: 四單元全開 (4-Unit Limit)": [{'name': 'A', 'target': 180.0, 'duration': 200.0, 'weight': 1000.0}, {'name': 'B', 'target': 180.0, 'duration': 200.0, 'weight': 1000.0}, {'name': 'C', 'target': 180.0, 'duration': 200.0, 'weight': 1000.0}, {'name': 'D', 'target': 180.0, 'duration': 200.0, 'weight': 1000.0}]
-}
+# Sync Scenarios with Benchmark
+SCENARIOS = {f"{s['name']}": s['tasks'] for s in BENCHMARK_SCENARIOS}
 
 class SmartController:
     def __init__(self):
@@ -60,19 +57,23 @@ class SmartController:
         self.use_ai = False
         self.model_type = "rules"
         
-        # Check for V1.0 Model
-        if os.path.exists("model.pth"):
+        # Robust Model Loading
+        model_path = os.path.join(current_dir, "model.pth")
+        
+        if os.path.exists(model_path):
             try:
                 self.model = RCPolicy()
-                self.model.load_state_dict(torch.load("model.pth"))
+                self.model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
                 self.model.eval()
                 self.use_ai = True
                 self.model_type = "rcp"
-                print(">>> RCP V1.0 Loaded (Ambitious Mode) <<<")
+                print(f">>> RCP V1.0 Loaded from {model_path} <<<")
             except Exception as e:
                 print(f"RCP Load Failed: {e}")
+        else:
+            print(f"Warning: model.pth not found at {model_path}")
         
-        if not self.use_ai: print("Rule Controller Active")
+        if not self.use_ai: print("Rule Controller Active (Fallback)")
 
     def decide(self, temp, units):
         if self.use_ai and self.model:
