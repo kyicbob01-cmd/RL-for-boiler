@@ -1,14 +1,12 @@
 """
-Return-Conditioned Policy (RCP) Training Script
-==============================================
-Training framework for the RCP model using offline RL.
+Return-Conditioned Policy Training
+Trains RCP model using offline RL on varied trajectories.
 """
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
 import os
 from boiler_env import BoilerPhysics
 from benchmark import BENCHMARK_SCENARIOS
@@ -16,11 +14,9 @@ from benchmark import BENCHMARK_SCENARIOS
 # Device Configuration
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
-if device.type == 'cuda':
-    print(f"GPU: {torch.cuda.get_device_name(0)}")
 
-# Baseline controller for data collection
 class SmartController:
+    # Baseline controller for data generation
     def decide(self, temp, units):
         active = [u for u in units.values() if u['state'] != 'FINISHED']
         if not active: return 0.0
@@ -48,7 +44,6 @@ class SmartController:
 class RCPolicy(nn.Module):
     def __init__(self):
         super().__init__()
-        # 512 + Dropout for RTX 5060
         self.net = nn.Sequential(
             nn.Linear(6, 512), nn.ReLU(),
             nn.Dropout(0.1),
@@ -64,7 +59,7 @@ class RCPolicy(nn.Module):
         return self.net(x)
 
 def collect_data(num_episodes=10000):
-    print(f"Collecting Training Data ({num_episodes} episodes)...")
+    print(f"Collecting Data ({num_episodes})...")
     controller = SmartController()
     all_data = []
     
@@ -80,7 +75,6 @@ def collect_data(num_episodes=10000):
         {"name": "Train_Low_2", "tasks": [{"name": "B", "target": 80.0, "duration": 120.0, "weight": 500.0}]},
         {"name": "Train_Low_3", "tasks": [{"name": "C", "target": 90.0, "duration": 150.0, "weight": 500.0}]},
     ]
-    
     total_scenarios = BENCHMARK_SCENARIOS + low_temp_scenarios * 3
     
     for ep in range(num_episodes):
@@ -90,7 +84,7 @@ def collect_data(num_episodes=10000):
         for task in scenario["tasks"]:
             physics.add_unit(task["name"], task["target"], task["duration"], task["weight"])
         
-        # Weighted strategy selection
+        # Strategy Mixing
         rand_val = np.random.rand()
         if rand_val < 0.25: _, modifier = strategies[0]
         elif rand_val < 0.65: _, modifier = strategies[1]
@@ -118,68 +112,50 @@ def collect_data(num_episodes=10000):
                 load / 2000000.0
             ], dtype=np.float32)
             
-            base_power = controller.decide(physics.boiler_temp, physics.units)
-            power = modifier(base_power)
-            power = max(0, min(100, power))
+            base = controller.decide(physics.boiler_temp, physics.units)
+            power = max(0, min(100, modifier(base)))
             
-            trajectory.append({
-                'state': state,
-                'action': power / 100.0
-            })
-            
+            trajectory.append({'state': state, 'action': power / 100.0})
             physics.step(power, dt=0.5)
         
         if task_completed:
-            final_cost = physics.total_cost
+            cost = physics.total_cost
             for t in trajectory:
-                t['final_cost'] = final_cost
+                t['final_cost'] = cost
                 all_data.append(t)
         
-        if (ep + 1) % 1000 == 0:
-            print(f"  Progress: {ep+1}/{num_episodes}")
+        if (ep + 1) % 1000 == 0: print(f"  Progress: {ep+1}")
     
-    print(f"Data Collection Complete: {len(all_data)} valid samples.")
+    print(f"Data Collection Complete: {len(all_data)} samples.")
     return all_data
 
 def train(data, epochs=500):
-    print(f"\nTraining Model ({epochs} Epochs)...")
+    print(f"\nTraining ({epochs} Epochs)...")
     
-    states = np.array([d['state'] for d in data], dtype=np.float32)
-    actions = np.array([[d['action']] for d in data], dtype=np.float32)
-    costs = np.array([[d['final_cost']] for d in data], dtype=np.float32)
-    
-    states_t = torch.tensor(states).to(device)
-    actions_t = torch.tensor(actions).to(device)
-    costs_t = torch.tensor(costs).to(device)
+    states = torch.tensor(np.array([d['state'] for d in data], dtype=np.float32)).to(device)
+    actions = torch.tensor(np.array([[d['action']] for d in data], dtype=np.float32)).to(device)
+    costs = torch.tensor(np.array([[d['final_cost']] for d in data], dtype=np.float32)).to(device)
     
     BATCH_SIZE = 32768
-    num_samples = states_t.shape[0]
+    num_samples = states.shape[0]
     
     model = RCPolicy().to(device)
     torch.set_float32_matmul_precision('high')
-    print("TF32 Enabled (RTX 5060 Acceleration).")
 
     opt = optim.Adam(model.parameters(), lr=1e-3)
     scheduler = optim.lr_scheduler.StepLR(opt, step_size=100, gamma=0.5)
     loss_fn = nn.MSELoss()
     
-    print(f"Dataset Size: {num_samples} | Batch Size: {BATCH_SIZE}")
-    
     for epoch in range(epochs):
         indices = torch.randperm(num_samples, device=device)
-        total_loss = 0
-        batches = 0
+        total_loss, batches = 0, 0
         
-        for start_idx in range(0, num_samples, BATCH_SIZE):
-            idx = indices[start_idx : start_idx + BATCH_SIZE]
-            
-            s_batch = states_t[idx]
-            c_batch = costs_t[idx]
-            a_batch = actions_t[idx]
+        for start in range(0, num_samples, BATCH_SIZE):
+            idx = indices[start : start + BATCH_SIZE]
+            pred = model(states[idx], costs[idx])
+            loss = loss_fn(pred, actions[idx])
             
             opt.zero_grad()
-            pred = model(s_batch, c_batch)
-            loss = loss_fn(pred, a_batch)
             loss.backward()
             opt.step()
             
@@ -187,19 +163,17 @@ def train(data, epochs=500):
             batches += 1
         
         scheduler.step()
-        
         if (epoch + 1) % 50 == 0:
             print(f"  Epoch {epoch+1}: Loss = {total_loss/batches:.4f}")
     
     model.cpu()
     torch.save(model.state_dict(), "model.pth")
-    print("\nModel Saved: model.pth")
+    print("Model Saved.")
     return model.to(device)
 
 def validate(model):
-    print("\nValidating Model Performance...")
+    print("\nValidating...")
     model.eval()
-    
     for scenario in BENCHMARK_SCENARIOS[:5]:
         physics = BoilerPhysics()
         physics.reset()
@@ -223,17 +197,9 @@ def validate(model):
                 power = model(state, target).item() * 100.0
                 physics.step(power, dt=0.5)
         
-        print(f"  {scenario['name']}: Cost = {physics.total_cost:.2f}")
+        print(f"  {scenario['name']}: {physics.total_cost:.2f}")
 
 if __name__ == "__main__":
-    print("-" * 60)
-    print("  RCP Training Pipeline")
-    print("-" * 60)
-    
     data = collect_data(10000)
     model = train(data, epochs=500)
     validate(model)
-    
-    print("\n" + "-" * 60)
-    print("  Pipeline Completed Successfully")
-    print("-" * 60)

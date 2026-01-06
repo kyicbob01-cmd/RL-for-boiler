@@ -1,25 +1,20 @@
 """
-SC vs RCP - Performance Comparison Script
-=========================================
-Benchmarks the Return-Conditioned Policy (RCP) against the Rule-Based 
-SmartController (SC) across 10 standard scenarios.
+SC vs RCP Performance Benchmark
+Compares trained RCP model against rule-based SmartController.
 """
 
-import numpy as np
 import torch
 import torch.nn as nn
 import os
-import pandas as pd
 from boiler_env import BoilerPhysics
 from benchmark import BENCHMARK_SCENARIOS
-from train import RCPolicy  # Import model architecture
+from train import RCPolicy
 
 # Device Configuration
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
 
 class SmartControllerRules:
-    """Legacy rule-based logic for comparison baseline."""
+    # Rule-based logic for baseline comparison
     def decide(self, temp, units):
         active = [u for u in units.values() if u['state'] != 'FINISHED']
         if not active: return 0.0
@@ -53,7 +48,7 @@ def run_simulation(controller_type, model=None, scenario=None):
     
     sc_rules = SmartControllerRules()
     
-    for _ in range(2000): # Max 1000s
+    for _ in range(2000):
         max_t, active, load = physics.get_system_state()
         if active == 0: break
         
@@ -70,44 +65,33 @@ def run_simulation(controller_type, model=None, scenario=None):
                     load / 2000000.0
                 ]], dtype=torch.float32).to(device)
                 
-                # Ambitious Mode: Always ask for 5.0 TWD.
+                # Inference Target: 5.0 (Ambitious Mode)
                 target = torch.tensor([[5.0]], dtype=torch.float32).to(device)
-                
                 with torch.no_grad():
                     power = model(obs, target).item() * 100.0
         
         physics.step(power, dt=0.5)
         
-    return {
-        "cost": physics.total_cost
-    }
+    return {"cost": physics.total_cost}
 
 def compare_all():
-    print("="*80)
-    print("  SC vs RCP - Performance Benchmark")
-    print("="*80)
-    
+    print("SC vs RCP Benchmark")
     if not os.path.exists("model.pth"):
-        print("Error: model.pth not found! Run train.py first.")
+        print("Error: model.pth not found.")
         return
 
     rcp_model = RCPolicy().to(device)
     try:
         rcp_model.load_state_dict(torch.load("model.pth", map_location=device))
         rcp_model.eval()
-        print(">>> RCP Model Loaded Successfully")
     except Exception as e:
-        print(f"Error loading RCP model: {e}")
+        print(f"Error loading model: {e}")
         return
 
-    results = []
-    print(f"{'Scenario':<25} | {'SC Cost':<10} | {'RCP Cost':<10} | {'Diff':<10} | {'Winner':<10}")
-    print("-" * 80)
+    print(f"{'Scenario':<25} | {'SC':<8} | {'RCP':<8} | {'Diff':<8} | {'Winner':<8}")
     
-    sc_wins = 0
-    rcp_wins = 0
-    total_sc_cost = 0
-    total_rcp_cost = 0
+    sc_wins, rcp_wins = 0, 0
+    total_sc, total_rcp = 0, 0
 
     for scenario in BENCHMARK_SCENARIOS:
         res_sc = run_simulation("SC", scenario=scenario)
@@ -115,7 +99,7 @@ def compare_all():
         
         diff = res_sc['cost'] - res_rcp['cost']
         if diff > 0.5:
-            winner = "RCP 🏆"
+            winner = "RCP"
             rcp_wins += 1
         elif diff < -0.5:
             winner = "SC"
@@ -123,15 +107,13 @@ def compare_all():
         else:
             winner = "Tie"
             
-        print(f"{scenario['name']:<25} | {res_sc['cost']:>8.2f}   | {res_rcp['cost']:>8.2f}   | {diff:>+8.2f}   | {winner}")
+        print(f"{scenario['name']:<25} | {res_sc['cost']:>8.2f} | {res_rcp['cost']:>8.2f} | {diff:>+8.2f} | {winner}")
         
-        total_sc_cost += res_sc['cost']
-        total_rcp_cost += res_rcp['cost']
+        total_sc += res_sc['cost']
+        total_rcp += res_rcp['cost']
 
-    print("-" * 80)
-    print(f"Total Wins: SC={sc_wins}, RCP={rcp_wins}")
-    print(f"Total Cost: SC={total_sc_cost:.2f}, RCP={total_rcp_cost:.2f} (Diff: {total_sc_cost - total_rcp_cost:+.2f})")
-    print("="*80)
+    print(f"Wins: SC={sc_wins}, RCP={rcp_wins}")
+    print(f"Total Cost: SC={total_sc:.2f}, RCP={total_rcp:.2f}")
 
 if __name__ == "__main__":
     compare_all()
