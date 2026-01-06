@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# IDES
+.vscode/
+.idea/
+
+# Archives and Data
+archive/
+logs/
+user_data/
+presentation_assets/
+
+# Large binaries (Optional, but rc_policy.pth is small enough to include)
+# *.pth 
+
