@@ -1,6 +1,7 @@
 """
-Return-Conditioned Policy Training (V2)
-Trains RCP model using offline RL on varied trajectories.
+Return-Conditioned Policy V2.0 (Self-Evolution)
+Teacher: V1.0 Model (Ambitious Mode)
+Student: V2.0 Model (Learns from Elite Trajectories)
 """
 
 import numpy as np
@@ -8,6 +9,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import os
+import sys
+
+# Ensure imports work
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(current_dir)
+
 from boiler_env import BoilerPhysics
 from benchmark import BENCHMARK_SCENARIOS
 
@@ -15,32 +22,9 @@ from benchmark import BENCHMARK_SCENARIOS
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-class SmartController:
-    # Baseline controller for data generation
-    def decide(self, temp, units):
-        active = [u for u in units.values() if u['state'] != 'FINISHED']
-        if not active: return 0.0
-        
-        needed = [u for u in active if u['current'] < u['target'] - 0.5]
-        targets = [u['target'] for u in needed]
-        
-        if not targets:
-            holding = [u['target'] for u in active if u['state'] == 'HOLDING']
-            if holding and temp < min(holding) + 3.0: return 30.0
-            return 0.0
-        
-        max_t = max(targets)
-        max_demand = max([u['current'] for u in needed])
-        target_boiler = max(max_t + 5.0, max_demand + 6.0)
-        gap = target_boiler - temp
-        
-        if gap < -2.0: return 0.0
-        if gap > 20: return 100.0
-        elif gap > 10: return 80.0
-        elif gap > 5: return 50.0
-        elif gap > 0: return 20.0
-        else: return 0.0
-
+# ==========================================
+# 0. Model Architecture (Shared)
+# ==========================================
 class RCPolicy(nn.Module):
     def __init__(self):
         super().__init__()
@@ -58,42 +42,86 @@ class RCPolicy(nn.Module):
         x = torch.cat([state, cost_norm], dim=-1)
         return self.net(x)
 
-def collect_data(num_episodes=10000):
-    print(f"Collecting Data ({num_episodes})...")
-    controller = SmartController()
+# ==========================================
+# 1. Teacher Agent (V1.0)
+# ==========================================
+class RCPTeacher:
+    def __init__(self):
+        self.model = RCPolicy().to(device)
+        # Load V1.0 Model
+        v1_path = os.path.join(current_dir, "..", "V1.0", "model.pth")
+        if os.path.exists(v1_path):
+            self.model.load_state_dict(torch.load(v1_path, map_location=device))
+            self.model.eval()
+            print(f">>> Teacher Loaded: {v1_path}")
+        else:
+            raise FileNotFoundError(f"Teacher model not found at {v1_path}")
+
+    def decide(self, physics, noise_scale=0.05):
+        """
+        Teacher Decision with Exploration Noise
+        noise_scale: Standard deviation of Gaussian noise added to action
+        """
+        max_t, active, load = physics.get_system_state()
+        
+        obs = torch.tensor([[
+            physics.boiler_temp / 300.0,
+            max_t / 300.0,
+            active / 4.0,
+            0.0, # Rate assumption
+            load / 2000000.0
+        ]], dtype=torch.float32).to(device)
+        
+        # Ambitious Target for Teacher
+        target = torch.tensor([[5.0]], dtype=torch.float32).to(device)
+        
+        with torch.no_grad():
+            action = self.model(obs, target).item()
+            
+        # Add Exploration Noise
+        if noise_scale > 0:
+            action += np.random.normal(0, noise_scale)
+            action = np.clip(action, 0.0, 1.0)
+            
+        return action * 100.0
+
+# ==========================================
+# 2. Data Collection (Self-Play)
+# ==========================================
+def collect_data(num_episodes=20000):
+    print(f"Collecting Self-Play Data ({num_episodes} episodes)...")
+    teacher = RCPTeacher()
     all_data = []
     
-    strategies = [
-        ("Baseline", lambda p: p),
-        ("Aggressive", lambda p: min(100, p * 1.3)),
-        ("Conservative", lambda p: p * 0.7),
-        ("SuperSaver", lambda p: p * 0.4 if p < 50 else p * 0.8)
-    ]
-    
-    low_temp_scenarios = [
-        {"name": "Train_Low_1", "tasks": [{"name": "A", "target": 70.0, "duration": 100.0, "weight": 500.0}]},
-        {"name": "Train_Low_2", "tasks": [{"name": "B", "target": 80.0, "duration": 120.0, "weight": 500.0}]},
-        {"name": "Train_Low_3", "tasks": [{"name": "C", "target": 90.0, "duration": 150.0, "weight": 500.0}]},
-    ]
-    total_scenarios = BENCHMARK_SCENARIOS + low_temp_scenarios * 3
+    # Extended Scenarios (Benchmark + Random Variations)
+    scenarios = BENCHMARK_SCENARIOS * 5 
     
     for ep in range(num_episodes):
-        scenario = total_scenarios[ep % len(total_scenarios)]
+        # Scenario Selection
+        if ep < len(scenarios):
+            base_scenario = scenarios[ep]
+        else:
+            # Generate Random Scenario for Diversity
+            import random
+            base_scenario = {"name": f"Rand_{ep}", "tasks": []}
+            for _ in range(random.randint(1, 4)):
+                base_scenario["tasks"].append({
+                    "name": "Unit", 
+                    "target": random.uniform(80, 180), 
+                    "duration": random.uniform(50, 400), 
+                    "weight": random.uniform(100, 2000)
+                })
+
         physics = BoilerPhysics()
         physics.reset()
-        for task in scenario["tasks"]:
+        for task in base_scenario["tasks"]:
             physics.add_unit(task["name"], task["target"], task["duration"], task["weight"])
-        
-        # Strategy Mixing
-        rand_val = np.random.rand()
-        if rand_val < 0.25: _, modifier = strategies[0]
-        elif rand_val < 0.65: _, modifier = strategies[1]
-        elif rand_val < 0.90: _, modifier = strategies[2]
-        else: _, modifier = strategies[3]
         
         trajectory = []
         prev_temp = physics.boiler_temp
         task_completed = False
+        
+        noise = 0.05 
         
         for step in range(2000):
             max_t, active, load = physics.get_system_state()
@@ -112,25 +140,57 @@ def collect_data(num_episodes=10000):
                 load / 2000000.0
             ], dtype=np.float32)
             
-            base = controller.decide(physics.boiler_temp, physics.units)
-            power = max(0, min(100, modifier(base)))
+            # Teacher Acts
+            power = teacher.decide(physics, noise_scale=noise)
             
-            trajectory.append({'state': state, 'action': power / 100.0})
+            trajectory.append({
+                'state': state,
+                'action': power / 100.0
+            })
+            
             physics.step(power, dt=0.5)
         
         if task_completed:
-            cost = physics.total_cost
+            final_cost = physics.total_cost
             for t in trajectory:
-                t['final_cost'] = cost
-                all_data.append(t)
+                t['final_cost'] = final_cost
+            
+            all_data.append({
+                'trajectory': trajectory,
+                'cost': final_cost
+            })
         
-        if (ep + 1) % 1000 == 0: print(f"  Progress: {ep+1}")
-    
-    print(f"Data Collection Complete: {len(all_data)} samples.")
+        if (ep + 1) % 2000 == 0:
+            print(f"  Progress: {ep+1}/{num_episodes}")
+            
     return all_data
 
+# ==========================================
+# 3. Elite Filtering (Distillation)
+# ==========================================
+def filter_elite_data(raw_data, quantile=0.3):
+    """Keep top X% most efficient episodes"""
+    costs = [d['cost'] for d in raw_data]
+    threshold = np.quantile(costs, quantile)
+    avg_cost = np.mean(costs)
+    
+    elite_samples = []
+    for d in raw_data:
+        if d['cost'] <= threshold:
+            elite_samples.extend(d['trajectory'])
+            
+    print(f"\nFiltering Complete:")
+    print(f"  Original Avg Cost: {avg_cost:.2f}")
+    print(f"  Elite Threshold (Top {quantile*100}%): {threshold:.2f}")
+    print(f"  Elite Samples: {len(elite_samples)} steps")
+    
+    return elite_samples
+
+# ==========================================
+# 4. Training Loop
+# ==========================================
 def train(data, epochs=500):
-    print(f"\nTraining ({epochs} Epochs)...")
+    print(f"\nTraining Student V2.0 ({epochs} Epochs)...")
     
     states = torch.tensor(np.array([d['state'] for d in data], dtype=np.float32)).to(device)
     actions = torch.tensor(np.array([[d['action']] for d in data], dtype=np.float32)).to(device)
@@ -139,10 +199,10 @@ def train(data, epochs=500):
     BATCH_SIZE = 32768
     num_samples = states.shape[0]
     
-    model = RCPolicy().to(device)
+    student = RCPolicy().to(device)
     torch.set_float32_matmul_precision('high')
 
-    opt = optim.Adam(model.parameters(), lr=1e-3)
+    opt = optim.Adam(student.parameters(), lr=1e-3)
     scheduler = optim.lr_scheduler.StepLR(opt, step_size=100, gamma=0.5)
     loss_fn = nn.MSELoss()
     
@@ -152,27 +212,22 @@ def train(data, epochs=500):
         
         for start in range(0, num_samples, BATCH_SIZE):
             idx = indices[start : start + BATCH_SIZE]
-            pred = model(states[idx], costs[idx])
+            pred = student(states[idx], costs[idx])
             loss = loss_fn(pred, actions[idx])
-            
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-            
-            total_loss += loss.item()
-            batches += 1
+            opt.zero_grad(); loss.backward(); opt.step()
+            total_loss += loss.item(); batches += 1
         
         scheduler.step()
         if (epoch + 1) % 50 == 0:
             print(f"  Epoch {epoch+1}: Loss = {total_loss/batches:.4f}")
     
-    model.cpu()
-    torch.save(model.state_dict(), "model.pth")
-    print("Model Saved.")
-    return model.to(device)
+    student.cpu()
+    torch.save(student.state_dict(), "model_v2.pth")
+    print("Student V2.0 Saved: model_v2.pth")
+    return student.to(device)
 
 def validate(model):
-    print("\nValidating...")
+    print("\nValidating Student V2.0...")
     model.eval()
     for scenario in BENCHMARK_SCENARIOS[:5]:
         physics = BoilerPhysics()
@@ -184,22 +239,21 @@ def validate(model):
             for _ in range(2000):
                 max_t, active, load = physics.get_system_state()
                 if active == 0: break
-                
-                state = torch.tensor([[
-                    physics.boiler_temp / 300.0,
-                    max_t / 300.0,
-                    active / 4.0,
-                    0.0,
-                    load / 2000000.0
-                ]], dtype=torch.float32).to(device)
-                
+                obs = torch.tensor([[physics.boiler_temp/300.0, max_t/300.0, active/4.0, 0.0, load/2000000.0]], dtype=torch.float32).to(device)
                 target = torch.tensor([[5.0]], dtype=torch.float32).to(device)
-                power = model(state, target).item() * 100.0
+                power = model(obs, target).item() * 100.0
                 physics.step(power, dt=0.5)
-        
         print(f"  {scenario['name']}: {physics.total_cost:.2f}")
 
 if __name__ == "__main__":
-    data = collect_data(10000)
-    model = train(data, epochs=500)
-    validate(model)
+    # 1. Self-Play
+    raw_data = collect_data(20000)
+    
+    # 2. Distillation
+    elite_data = filter_elite_data(raw_data, quantile=0.3)
+    
+    # 3. Train Student
+    student = train(elite_data, epochs=500)
+    
+    # 4. Quick Check
+    validate(student)
