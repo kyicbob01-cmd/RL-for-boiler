@@ -45,13 +45,13 @@ F = {
     'tag': ("Segoe UI", 10),
 }
 
-# Scenarios
+# Scenarios (Traditional Chinese)
 SCENARIOS = {
-    "S1: Standard": [{'name': 'A', 'target': 150.0, 'duration': 90.0, 'weight': 300.0}, {'name': 'B', 'target': 90.0, 'duration': 500.0, 'weight': 100.0}, {'name': 'C', 'target': 100.0, 'duration': 150.0, 'weight': 900.0}],
-    "S2: High Temp": [{'name': 'A', 'target': 100.0, 'duration': 150.0, 'weight': 600.0}, {'name': 'B', 'target': 150.0, 'duration': 300.0, 'weight': 1000.0}],
-    "S6: Heavy Load": [{'name': 'BigTank', 'target': 150.0, 'duration': 300.0, 'weight': 2500.0}],
-    "S4: Conflict": [{'name': 'Low', 'target': 80.0, 'duration': 100.0, 'weight': 400.0}, {'name': 'High', 'target': 180.0, 'duration': 250.0, 'weight': 1200.0}],
-    "S9: 4-Unit Limit": [{'name': 'A', 'target': 180.0, 'duration': 200.0, 'weight': 1000.0}, {'name': 'B', 'target': 180.0, 'duration': 200.0, 'weight': 1000.0}, {'name': 'C', 'target': 180.0, 'duration': 200.0, 'weight': 1000.0}, {'name': 'D', 'target': 180.0, 'duration': 200.0, 'weight': 1000.0}]
+    "S1: 標準生產 (Standard)": [{'name': 'A', 'target': 150.0, 'duration': 90.0, 'weight': 300.0}, {'name': 'B', 'target': 90.0, 'duration': 500.0, 'weight': 100.0}, {'name': 'C', 'target': 100.0, 'duration': 150.0, 'weight': 900.0}],
+    "S2: 高溫作業 (High Temp)": [{'name': 'A', 'target': 100.0, 'duration': 150.0, 'weight': 600.0}, {'name': 'B', 'target': 150.0, 'duration': 300.0, 'weight': 1000.0}],
+    "S6: 重負載極限 (Heavy Load)": [{'name': 'BigTank', 'target': 150.0, 'duration': 300.0, 'weight': 2500.0}],
+    "S4: 大溫差衝突 (Conflict)": [{'name': 'Low', 'target': 80.0, 'duration': 100.0, 'weight': 400.0}, {'name': 'High', 'target': 180.0, 'duration': 250.0, 'weight': 1200.0}],
+    "S9: 四單元全開 (4-Unit Limit)": [{'name': 'A', 'target': 180.0, 'duration': 200.0, 'weight': 1000.0}, {'name': 'B', 'target': 180.0, 'duration': 200.0, 'weight': 1000.0}, {'name': 'C', 'target': 180.0, 'duration': 200.0, 'weight': 1000.0}, {'name': 'D', 'target': 180.0, 'duration': 200.0, 'weight': 1000.0}]
 }
 
 class SmartController:
@@ -60,6 +60,7 @@ class SmartController:
         self.use_ai = False
         self.model_type = "rules"
         
+        # Check for V1.0 Model
         if os.path.exists("model.pth"):
             try:
                 self.model = RCPolicy()
@@ -67,7 +68,7 @@ class SmartController:
                 self.model.eval()
                 self.use_ai = True
                 self.model_type = "rcp"
-                print("RCP V1.0 Loaded")
+                print(">>> RCP V1.0 Loaded (Ambitious Mode) <<<")
             except Exception as e:
                 print(f"RCP Load Failed: {e}")
         
@@ -90,6 +91,7 @@ class SmartController:
                 
                 if self.model_type == 'rcp':
                     obs_t = torch.tensor([obs], dtype=torch.float32)
+                    # Use Ambitious Target Cost = 5.0
                     target_t = torch.tensor([[5.0]], dtype=torch.float32)
                     with torch.no_grad():
                         power = self.model(obs_t, target_t).item() * 100.0
@@ -201,7 +203,7 @@ class IndustrialRender:
 class ProfessionalHMI:
     def __init__(self, root):
         self.root = root
-        self.root.title("BOILER CONTROL SYSTEM V2.0")
+        self.root.title("工業鍋爐控制系統 V1.0 (Boiler SCADA)")
         self.root.geometry("1920x1080")
         self.root.resizable(False, False)
         self.root.configure(bg=C['bg_app'])
@@ -218,22 +220,22 @@ class ProfessionalHMI:
         toolbar = tk.Frame(self.root, bg=C['bg_app'], height=60, bd=1, relief='raised')
         toolbar.pack(fill=tk.X, side=tk.TOP)
         
-        tk.Label(toolbar, text="🏭 BOILER SCADA", font=F['h1'], bg=C['bg_app']).pack(side=tk.LEFT, padx=20)
+        tk.Label(toolbar, text="🏭 鍋爐控制 SCADA", font=F['h1'], bg=C['bg_app']).pack(side=tk.LEFT, padx=20)
         
         ctrl_frame = tk.Frame(toolbar, bg=C['bg_app'])
         ctrl_frame.pack(side=tk.LEFT, padx=50)
         
-        tk.Label(ctrl_frame, text="Batch:", bg=C['bg_app'], font=F['body']).pack(side=tk.LEFT)
+        tk.Label(ctrl_frame, text="生產批次 (Batch):", bg=C['bg_app'], font=F['body']).pack(side=tk.LEFT)
         self.scenario_var = tk.StringVar(value=list(SCENARIOS.keys())[0])
         self.scenario_cb = ttk.Combobox(ctrl_frame, textvariable=self.scenario_var, 
                                         values=list(SCENARIOS.keys()), font=F['body'], width=20, state='readonly')
         self.scenario_cb.pack(side=tk.LEFT, padx=10)
         
-        self.btn_start = tk.Button(ctrl_frame, text="START", bg=C['status_run'], fg='white', 
+        self.btn_start = tk.Button(ctrl_frame, text="啟動 (START)", bg=C['status_run'], fg='white', 
                              font=F['body'], command=self._start, width=12)
         self.btn_start.pack(side=tk.LEFT, padx=5)
         
-        self.btn_reset = tk.Button(ctrl_frame, text="RESET", bg=C['bg_panel'], 
+        self.btn_reset = tk.Button(ctrl_frame, text="重置 (RESET)", bg=C['bg_panel'], 
                              font=F['body'], command=self._reset, width=12)
         self.btn_reset.pack(side=tk.LEFT, padx=5)
         
@@ -244,10 +246,10 @@ class ProfessionalHMI:
         main_content.columnconfigure(1, weight=1, uniform="group1")
         main_content.rowconfigure(0, weight=1)
         
-        self.h_frame = self._create_station(main_content, "OPERATOR", True, C['human_color'])
+        self.h_frame = self._create_station(main_content, "操作員站 (OPERATOR)", True, C['human_color'])
         self.h_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
         
-        self.a_frame = self._create_station(main_content, "AUTO CONTROL", False, C['ai_color'])
+        self.a_frame = self._create_station(main_content, "自動控制站 (AI AUTO)", False, C['ai_color'])
         self.a_frame.grid(row=0, column=1, sticky="nsew", padx=(2, 0))
 
     def _create_station(self, parent, title, is_human, theme_color):
@@ -273,29 +275,29 @@ class ProfessionalHMI:
         dash_container = tk.Frame(content, bg=C['bg_panel'])
         dash_container.place(relx=0.01, rely=0.80, relwidth=0.98, relheight=0.19)
         
-        stat_frame = tk.LabelFrame(dash_container, text="DATA", font=F['tag'], bg=C['bg_panel'], fg=C['text_main'])
+        stat_frame = tk.LabelFrame(dash_container, text="即時數據 (DATA)", font=F['tag'], bg=C['bg_panel'], fg=C['text_main'])
         stat_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
         
-        tk.Label(stat_frame, text="Total Cost:", bg=C['bg_panel'], font=F['body']).pack(anchor='w', padx=10, pady=5)
+        tk.Label(stat_frame, text="總能耗成本:", bg=C['bg_panel'], font=F['body']).pack(anchor='w', padx=10, pady=5)
         lbl_cost = tk.Label(stat_frame, text="0.00 TWD", bg=C['bg_panel'], font=F['num_big'], fg=theme_color)
         lbl_cost.pack(anchor='w', padx=10)
         
         if is_human:
-            ctrl_frame = tk.LabelFrame(dash_container, text="MANUAL", font=F['tag'], bg=C['bg_panel'], fg=C['text_main'])
+            ctrl_frame = tk.LabelFrame(dash_container, text="手動控制 (MANUAL)", font=F['tag'], bg=C['bg_panel'], fg=C['text_main'])
             ctrl_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
             
             self.pwr_scale = tk.Scale(ctrl_frame, from_=0, to=100, orient=tk.HORIZONTAL, 
-                                    label="Power %", font=F['body'], bg=C['bg_panel'], length=200)
+                                    label="功率設定 %", font=F['body'], bg=C['bg_panel'], length=200)
             self.pwr_scale.pack(fill=tk.X, padx=20, pady=5)
         else:
-            ai_status_frame = tk.LabelFrame(dash_container, text="AI STATE", font=F['tag'], bg=C['bg_panel'], fg=C['text_main'])
+            ai_status_frame = tk.LabelFrame(dash_container, text="AI 狀態", font=F['tag'], bg=C['bg_panel'], fg=C['text_main'])
             ai_status_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
             
             if self.ctrl.use_ai:
-                status_text = "🧠 RCP Agent"
+                status_text = "🧠 RCP Agent\n(Ambitious Mode)"
                 status_color = C['status_active']
             else:
-                status_text = "🔧 Rule-Based"
+                status_text = "🔧 規則控制\n(Rule-Based)"
                 status_color = C['status_run']
             
             tk.Label(ai_status_frame, text=status_text, font=F['body'], bg=C['bg_panel'], fg=status_color).pack(expand=True)
@@ -321,7 +323,7 @@ class ProfessionalHMI:
         
         canvas.create_rectangle(boiler_x-30, boiler_y-40, boiler_x+30, boiler_y-10, fill='black')
         canvas.create_text(boiler_x, boiler_y-25, text=f"{engine.temp:.1f}", fill='red', font=F['num'])
-        canvas.create_text(boiler_x, boiler_y-80, text="B-101\nBoiler", font=F['tag'], justify='center')
+        canvas.create_text(boiler_x, boiler_y-80, text="B-101\n主鍋爐", font=F['tag'], justify='center')
         
         pipe_y = boiler_y - 20
         canvas.create_line(boiler_x+40, pipe_y, w-50, pipe_y, width=6, fill=C['pipe'])
@@ -393,8 +395,8 @@ class ProfessionalHMI:
                     except: pass
 
                     diff = self.human.cost - self.ai.cost
-                    res = "AI WINS" if diff > 0 else "YOU WIN"
-                    messagebox.showinfo("Result", f"{res}\nGap: {abs(diff):.2f} TWD")
+                    res = "AI 勝出" if diff > 0 else "人類勝出"
+                    messagebox.showinfo("測試結束", f"{res}\n差距: {abs(diff):.2f} TWD")
             except Exception as e:
                 print(e)
                 
