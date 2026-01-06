@@ -83,6 +83,19 @@ F = {
     "場景 2：高溫作業": [
         {'name': '反應槽 A', 'target': 100.0, 'duration': 150.0, 'weight': 600.0},
         {'name': '反應槽 B', 'target': 150.0, 'duration': 300.0, 'weight': 1000.0}
+    ],
+    "場景 3：重負載極限 (S6 AI強項)": [
+        {'name': '大型反應槽', 'target': 150.0, 'duration': 300.0, 'weight': 2500.0}
+    ],
+    "場景 4：大溫差衝突 (S4)": [
+        {'name': '低溫槽 A', 'target': 80.0, 'duration': 100.0, 'weight': 400.0},
+        {'name': '高溫槽 B', 'target': 180.0, 'duration': 250.0, 'weight': 1200.0}
+    ],
+    "場景 5：四單元極限 (S9)": [
+        {'name': '單元 A', 'target': 180.0, 'duration': 200.0, 'weight': 1000.0},
+        {'name': '單元 B', 'target': 180.0, 'duration': 200.0, 'weight': 1000.0},
+        {'name': '單元 C', 'target': 180.0, 'duration': 200.0, 'weight': 1000.0},
+        {'name': '單元 D', 'target': 180.0, 'duration': 200.0, 'weight': 1000.0}
     ]
 }
 
@@ -91,96 +104,29 @@ import torch
 import torch.nn as nn
 import numpy as np
 import os
-
-class Actor(nn.Module):
-    """Offline RL Actor Network"""
-    def __init__(self):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(5, 128), nn.ReLU(),
-            nn.Linear(128, 128), nn.ReLU(),
-            nn.Linear(128, 64), nn.ReLU(),
-            nn.Linear(64, 1), nn.Sigmoid()
-        )
-    
-    def forward(self, x):
-        return self.net(x) * 100.0
-
-class BCModel(nn.Module):
-    """Behavior Cloning 神經網路"""
-    def __init__(self):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(5, 128), nn.ReLU(),
-            nn.Linear(128, 128), nn.ReLU(),
-            nn.Linear(128, 64), nn.ReLU(),
-            nn.Linear(64, 1), nn.Sigmoid()
-        )
-    
-    def forward(self, x):
-        return self.net(x) * 100.0
-
-class RCPolicy(nn.Module):
-    """Return-Conditioned Policy Network"""
-    def __init__(self):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(6, 128), nn.ReLU(),
-            nn.Linear(128, 128), nn.ReLU(),
-            nn.Linear(128, 64), nn.ReLU(),
-            nn.Linear(64, 1), nn.Sigmoid()
-        )
-    
-    def forward(self, state, target_cost):
-        cost_norm = target_cost / 50.0
-        x = torch.cat([state, cost_norm], dim=-1)
-        return self.net(x)
+from train import RCPolicy  # Import shared model architecture
 
 class SmartController:
-    """SmartController - 優先 RCP > Offline RL > BC > 規則"""
+    """SmartController - 優先 RCP > 規則"""
     def __init__(self):
         self.model = None
         self.use_ai = False
         self.model_type = "rules"
         
-        # 1. 嘗試載入 RCP (最新策略)
-        if os.path.exists("rc_policy.pth"):
+        # 載入 RCP V1.0
+        if os.path.exists("model.pth"):
             try:
                 self.model = RCPolicy()
-                self.model.load_state_dict(torch.load("rc_policy.pth"))
+                self.model.load_state_dict(torch.load("model.pth"))
                 self.model.eval()
                 self.use_ai = True
                 self.model_type = "rcp"
-                print(">>> RCP Agent Loaded (Target Cost=15) <<<")
+                print(">>> RCP Agent V1.0 Loaded (Ambitious Mode) <<<")
             except Exception as e:
                 print(f"RCP 載入失敗: {e}")
-
-        # 2. 嘗試載入 Offline RL
-        if not self.use_ai and os.path.exists("offline_rl_agent.pth"):
-            try:
-                self.model = Actor()
-                self.model.load_state_dict(torch.load("offline_rl_agent.pth"))
-                self.model.eval()
-                self.use_ai = True
-                self.model_type = "offline_rl"
-                print(">>> Offline RL Agent Loaded <<<")
-            except Exception as e:
-                print(f"Offline RL 載入失敗: {e}")
-        
-        # 3. 嘗試載入 BC
-        if not self.use_ai and os.path.exists("bc_agent.pth"):
-            try:
-                self.model = BCModel()
-                self.model.load_state_dict(torch.load("bc_agent.pth"))
-                self.model.eval()
-                self.use_ai = True
-                self.model_type = "bc"
-                print(">>> BC Agent Loaded <<<")
-            except Exception as e:
-                print(f"BC 載入失敗: {e}")
         
         if not self.use_ai:
-            print("[SmartController V3] 規則控制器已啟動")
+            print("[SmartController] 規則控制器已啟動 (Fallback)")
 
     def decide(self, temp, units):
         """決策函數"""
@@ -202,74 +148,50 @@ class SmartController:
                     temp / 300.0,
                     max_target / 300.0,
                     active_count / 4.0,
-                    0.0,  # rate simplification
+                    0.0,  # rate assumption
                     total_load / 2000000.0
                 ]
                 
-                # 1. RCP 模型
-                if hasattr(self, 'model_type') and self.model_type == 'rcp':
+                if self.model_type == 'rcp':
                     obs_t = torch.tensor([obs], dtype=torch.float32)
-                    target_t = torch.tensor([[15.0]], dtype=torch.float32) # 目標設定為 15 TWD (非常高效)
+                    # V1.0 Strategy: Ambitious Target = 5.0
+                    target_t = torch.tensor([[5.0]], dtype=torch.float32)
                     with torch.no_grad():
                         power = self.model(obs_t, target_t).item() * 100.0
                     return power
 
-                # 2. Offline RL (Actor)
-                elif hasattr(self, 'model_type') and self.model_type == 'offline_rl':
-                    obs_t = torch.tensor([obs], dtype=torch.float32)
-                    with torch.no_grad():
-                        power = self.model(obs_t).item() # output is 0-100 already
-                    return power
-
-                # 3. BC Model
-                else: 
-                    obs_t = torch.tensor([obs], dtype=torch.float32)
-                    with torch.no_grad():
-                        power = self.model(obs_t).item()
-                    return power
-
             except Exception as e:
                 print(f"AI Error: {e}")
+                return 0.0
         
+        return self._rule_based_fallback(temp, units)
+    
+    def _rule_based_fallback(self, temp, units):
         # === 規則控制 V3 (Fallback) ===
         active = [u for u in units.values() if u['state'] != '完成']
-        if not active: 
-            return 0.0  # 全部完成，關閉
+        if not active: return 0.0
         
-        # 找出還在加熱中的單元 (尚未達標)
         needed_units = [u for u in active if u['current'] < u['target'] - 0.5]
         needed_targets = [u['target'] for u in needed_units]
         
         if not needed_targets:
-            # 所有單元都達標，進入保溫模式
             holding = [u['target'] for u in active if u['state'] == '保溫']
-            if holding and temp < min(holding) + 3.0: 
-                return 30.0  # 維持微火保溫
+            if holding and temp < min(holding) + 3.0: return 30.0
             return 0.0
         
-        # 計算目標鍋爐溫度
         max_target = max(needed_targets)
         current_max_demand = max([u['current'] for u in needed_units])
         
-        # 確保足夠的驅動溫差
         min_driving_temp = current_max_demand + 6.0
         target_boiler = max(max_target + 5.0, min_driving_temp)
-        
         gap = target_boiler - temp
         
-        # 功率決策：階梯式控制
-        if gap < -2.0:
-            return 0.0   # 過熱，停止
-        elif gap > 20:
-            return 100.0  # 大差距，全力
-        elif gap > 10:
-            return 80.0
-        elif gap > 5:
-            return 50.0
-        elif gap > 0:
-            return 20.0
-        else:
-            return 0.0
+        if gap < -2.0: return 0.0
+        elif gap > 20: return 100.0
+        elif gap > 10: return 80.0
+        elif gap > 5: return 50.0
+        elif gap > 0: return 20.0
+        else: return 0.0
 
 class Engine:
     def __init__(self): self.reset()

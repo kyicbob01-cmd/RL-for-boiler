@@ -12,29 +12,12 @@ import os
 import pandas as pd
 from boiler_env import BoilerPhysics
 from benchmark import BENCHMARK_SCENARIOS
+from train import RCPolicy  # Import model architecture
 
-# ==========================================
-# Model Definition
-# ==========================================
-class RCPolicy(nn.Module):
-    """Return-Conditioned Policy Network (Inference Mode)."""
-    def __init__(self):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(6, 128), nn.ReLU(),
-            nn.Linear(128, 128), nn.ReLU(),
-            nn.Linear(128, 64), nn.ReLU(),
-            nn.Linear(64, 1), nn.Sigmoid()
-        )
-    
-    def forward(self, state, target_cost):
-        cost_norm = target_cost / 50.0
-        x = torch.cat([state, cost_norm], dim=-1)
-        return self.net(x)
+# Device Configuration
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
-# ==========================================
-# Rule-Based Controller
-# ==========================================
 class SmartControllerRules:
     """Legacy rule-based logic for comparison baseline."""
     def decide(self, temp, units):
@@ -61,9 +44,6 @@ class SmartControllerRules:
         elif gap > 0: return 20.0
         else: return 0.0
 
-# ==========================================
-# Simulation Runner
-# ==========================================
 def run_simulation(controller_type, model=None, scenario=None):
     physics = BoilerPhysics()
     physics.reset()
@@ -72,61 +52,48 @@ def run_simulation(controller_type, model=None, scenario=None):
         physics.add_unit(task["name"], task["target"], task["duration"], task["weight"])
     
     sc_rules = SmartControllerRules()
-    history_temp = []
-    current_time = 0.0
     
     for _ in range(2000): # Max 1000s
         max_t, active, load = physics.get_system_state()
         if active == 0: break
-        
-        rate = 0.0
-        if len(history_temp) > 0:
-            rate = physics.boiler_temp - history_temp[-1]
-        history_temp.append(physics.boiler_temp)
         
         power = 0.0
         if controller_type == "SC":
             power = sc_rules.decide(physics.boiler_temp, physics.units)
             
         elif controller_type == "RCP":
-            if model:
                 obs = torch.tensor([[
                     physics.boiler_temp / 300.0,
                     max_t / 300.0,
                     active / 4.0,
                     0.0,
                     load / 2000000.0
-                ]], dtype=torch.float32)
+                ]], dtype=torch.float32).to(device)
                 
-                # Inference Target: 10.0 TWD
-                target = torch.tensor([[10.0]], dtype=torch.float32)
+                # Ambitious Mode: Always ask for 5.0 TWD.
+                target = torch.tensor([[5.0]], dtype=torch.float32).to(device)
                 
                 with torch.no_grad():
                     power = model(obs, target).item() * 100.0
         
         physics.step(power, dt=0.5)
-        current_time += 0.5
         
     return {
-        "time": current_time,
         "cost": physics.total_cost
     }
 
-# ==========================================
-# Main Execution
-# ==========================================
 def compare_all():
     print("="*80)
     print("  SC vs RCP - Performance Benchmark")
     print("="*80)
     
-    if not os.path.exists("rc_policy.pth"):
-        print("Error: rc_policy.pth not found! Run train_rcp.py first.")
+    if not os.path.exists("model.pth"):
+        print("Error: model.pth not found! Run train.py first.")
         return
 
-    rcp_model = RCPolicy()
+    rcp_model = RCPolicy().to(device)
     try:
-        rcp_model.load_state_dict(torch.load("rc_policy.pth", map_location='cpu'))
+        rcp_model.load_state_dict(torch.load("model.pth", map_location=device))
         rcp_model.eval()
         print(">>> RCP Model Loaded Successfully")
     except Exception as e:

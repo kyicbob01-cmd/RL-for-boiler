@@ -1,13 +1,7 @@
 """
 Return-Conditioned Policy (RCP) Training Script
 ==============================================
-Training framework for the RCP model, using offline reinforcement learning 
-principles (supervised learning on trajectory outcomes).
-
-Key Features:
-- Diversity-driven Data Collection (SmartController Variants)
-- Hindsight Relabeling (Associating actions with final outcomes)
-- Failure Filtering (Excluding failed tasks to avoid survivorship bias)
+Training framework for the RCP model using offline RL.
 """
 
 import numpy as np
@@ -20,11 +14,13 @@ from boiler_env import BoilerPhysics
 from benchmark import BENCHMARK_SCENARIOS
 
 # Device Configuration
-device = torch.device("cpu") # Force CPU for stability
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
+if device.type == 'cuda':
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
 
+# Baseline controller for data collection
 class SmartController:
-    """Baseline controller for generating training data."""
     def decide(self, temp, units):
         active = [u for u in units.values() if u['state'] != 'FINISHED']
         if not active: return 0.0
@@ -50,33 +46,28 @@ class SmartController:
         else: return 0.0
 
 class RCPolicy(nn.Module):
-    """
-    Return-Conditioned Policy Network.
-    Input: State (5 dims) + Target Cost (1 dim)
-    Output: Power Action (0-1)
-    """
     def __init__(self):
         super().__init__()
+        # 512 + Dropout for RTX 5060
         self.net = nn.Sequential(
-            nn.Linear(6, 128), nn.ReLU(),
-            nn.Linear(128, 128), nn.ReLU(),
-            nn.Linear(128, 64), nn.ReLU(),
-            nn.Linear(64, 1), nn.Sigmoid()
+            nn.Linear(6, 512), nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 512), nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 256), nn.ReLU(),
+            nn.Linear(256, 1), nn.Sigmoid()
         )
     
     def forward(self, state, target_cost):
-        # Normalize target cost (assuming reasonable range 0-50)
         cost_norm = target_cost / 50.0
         x = torch.cat([state, cost_norm], dim=-1)
         return self.net(x)
 
 def collect_data(num_episodes=10000):
-    """Collects diverse training data using multiple expert strategies."""
     print(f"Collecting Training Data ({num_episodes} episodes)...")
     controller = SmartController()
     all_data = []
     
-    # Expert Strategies Definition
     strategies = [
         ("Baseline", lambda p: p),
         ("Aggressive", lambda p: min(100, p * 1.3)),
@@ -84,40 +75,32 @@ def collect_data(num_episodes=10000):
         ("SuperSaver", lambda p: p * 0.4 if p < 50 else p * 0.8)
     ]
     
-    # Supplementary Training Scenarios (Low Temperature Focus)
     low_temp_scenarios = [
         {"name": "Train_Low_1", "tasks": [{"name": "A", "target": 70.0, "duration": 100.0, "weight": 500.0}]},
         {"name": "Train_Low_2", "tasks": [{"name": "B", "target": 80.0, "duration": 120.0, "weight": 500.0}]},
         {"name": "Train_Low_3", "tasks": [{"name": "C", "target": 90.0, "duration": 150.0, "weight": 500.0}]},
     ]
     
-    # Combined Scenario Pool (Weighted)
     total_scenarios = BENCHMARK_SCENARIOS + low_temp_scenarios * 3
     
     for ep in range(num_episodes):
         scenario = total_scenarios[ep % len(total_scenarios)]
-        
         physics = BoilerPhysics()
         physics.reset()
         for task in scenario["tasks"]:
             physics.add_unit(task["name"], task["target"], task["duration"], task["weight"])
         
-        # Strategy Selection (Weighted Mix)
+        # Weighted strategy selection
         rand_val = np.random.rand()
-        if rand_val < 0.4:
-            _, modifier = strategies[0] # Baseline (40%)
-        elif rand_val < 0.7:
-             _, modifier = strategies[2] # Conservative (30%)
-        elif rand_val < 0.85:
-             _, modifier = strategies[1] # Aggressive (15%)
-        else:
-             _, modifier = strategies[3] # SuperSaver (15%)
+        if rand_val < 0.25: _, modifier = strategies[0]
+        elif rand_val < 0.65: _, modifier = strategies[1]
+        elif rand_val < 0.90: _, modifier = strategies[2]
+        else: _, modifier = strategies[3]
         
         trajectory = []
         prev_temp = physics.boiler_temp
         task_completed = False
         
-        # Simulation Loop
         for step in range(2000):
             max_t, active, load = physics.get_system_state()
             if active == 0: 
@@ -146,7 +129,6 @@ def collect_data(num_episodes=10000):
             
             physics.step(power, dt=0.5)
         
-        # Data Filtering: Only learn from completed tasks
         if task_completed:
             final_cost = physics.total_cost
             for t in trajectory:
@@ -160,7 +142,6 @@ def collect_data(num_episodes=10000):
     return all_data
 
 def train(data, epochs=500):
-    """Training loop for the RCP network."""
     print(f"\nTraining Model ({epochs} Epochs)...")
     
     states = np.array([d['state'] for d in data], dtype=np.float32)
@@ -171,45 +152,54 @@ def train(data, epochs=500):
     actions_t = torch.tensor(actions).to(device)
     costs_t = torch.tensor(costs).to(device)
     
-    dataset = TensorDataset(states_t, costs_t, actions_t)
-    loader = DataLoader(dataset, batch_size=1024, shuffle=True)
+    BATCH_SIZE = 32768
+    num_samples = states_t.shape[0]
     
     model = RCPolicy().to(device)
+    torch.set_float32_matmul_precision('high')
+    print("TF32 Enabled (RTX 5060 Acceleration).")
+
     opt = optim.Adam(model.parameters(), lr=1e-3)
     scheduler = optim.lr_scheduler.StepLR(opt, step_size=100, gamma=0.5)
     loss_fn = nn.MSELoss()
     
+    print(f"Dataset Size: {num_samples} | Batch Size: {BATCH_SIZE}")
+    
     for epoch in range(epochs):
+        indices = torch.randperm(num_samples, device=device)
         total_loss = 0
-        for s, c, a in loader:
+        batches = 0
+        
+        for start_idx in range(0, num_samples, BATCH_SIZE):
+            idx = indices[start_idx : start_idx + BATCH_SIZE]
+            
+            s_batch = states_t[idx]
+            c_batch = costs_t[idx]
+            a_batch = actions_t[idx]
+            
             opt.zero_grad()
-            pred = model(s, c)
-            loss = loss_fn(pred, a)
+            pred = model(s_batch, c_batch)
+            loss = loss_fn(pred, a_batch)
             loss.backward()
             opt.step()
+            
             total_loss += loss.item()
+            batches += 1
         
         scheduler.step()
         
         if (epoch + 1) % 50 == 0:
-            print(f"  Epoch {epoch+1}: Loss = {total_loss/len(loader):.4f}")
+            print(f"  Epoch {epoch+1}: Loss = {total_loss/batches:.4f}")
     
-    # Save Model
     model.cpu()
-    torch.save(model.state_dict(), "rc_policy.pth")
-    print("\nModel Saved: rc_policy.pth")
+    torch.save(model.state_dict(), "model.pth")
+    print("\nModel Saved: model.pth")
     return model.to(device)
 
 def validate(model):
-    """Quick validation run on a subset of scenarios."""
     print("\nValidating Model Performance...")
-    
-    # Inference Target: Aggressive but realistic
-    target_cost = 10.0
-    
     model.eval()
     
-    # Test on first 5 benchmark scenarios
     for scenario in BENCHMARK_SCENARIOS[:5]:
         physics = BoilerPhysics()
         physics.reset()
@@ -227,9 +217,9 @@ def validate(model):
                     active / 4.0,
                     0.0,
                     load / 2000000.0
-                ]], dtype=torch.float32)
+                ]], dtype=torch.float32).to(device)
                 
-                target = torch.tensor([[target_cost]], dtype=torch.float32)
+                target = torch.tensor([[5.0]], dtype=torch.float32).to(device)
                 power = model(state, target).item() * 100.0
                 physics.step(power, dt=0.5)
         
