@@ -305,6 +305,7 @@ def collect_data(num_episodes=20000):
             if use_rules:
                 power_vals = rules.decide(env) # Direct GPU logic, returns 0-100
                 actions = power_vals / 100.0 # Normalize for saving
+                actions = actions.unsqueeze(1) # Ensure (N, 1)
             else:
                 target_val = torch.ones((BATCH_SIZE, 1), device=device) * 5.0
                 with torch.no_grad():
@@ -345,15 +346,14 @@ def collect_data(num_episodes=20000):
             c = final_costs[i]
             
             s_ep = S[:length, i, :]
-            actions_norm = A[:length, i, :]
-            # If rules, actions_var shape might be (T, B) or (T, B, 1) depending on how handled
-            # Rules decide returns (N,), so A will be (T, N). Reshape if needed.
+            actions_norm = A[:length, i, :] # (T, 1)
             
             for t in range(length):
-                act = actions_norm[t]
+                act = actions_norm[t] # (1,)
                 if isinstance(act, np.ndarray): 
-                     if act.size > 1: act = act[0] # Handle shape
-                     else: act = float(act)
+                     act = act.item()
+                else:
+                     act = float(act)
                 
                 traj.append({
                     'state': s_ep[t],
