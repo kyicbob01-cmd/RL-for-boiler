@@ -283,6 +283,12 @@ def collect_data(num_episodes=20000):
         active_mask = torch.ones(BATCH_SIZE, dtype=torch.bool, device=device)
         traj_lengths = torch.zeros(BATCH_SIZE, dtype=torch.long, device=device)
         
+        # Initial Difficulty (for stratified filtering)
+        # Load = Sum(Gap * Weight * Active)
+        # We can just get state at step 0
+        _, _, _, init_load = env.get_state()
+        init_load_cpu = init_load.cpu().numpy() # (B,)
+        
         prev_temp = env.boiler_temp.clone()
         noise_level = 0.15 if not use_rules else 0.0 # Aggressive Noise for Teacher
         
@@ -344,6 +350,7 @@ def collect_data(num_episodes=20000):
             
             traj = []
             c = final_costs[i]
+            diff = init_load_cpu[i]
             
             s_ep = S[:length, i, :]
             actions_norm = A[:length, i, :] # (T, 1)
@@ -363,34 +370,63 @@ def collect_data(num_episodes=20000):
             
             all_data.append({
                 'trajectory': traj,
-                'cost': c
+                'cost': c,
+                'difficulty': diff
             })
             
-        print(f"  Batch {it+1}/{iterations} [{strategy_name}] Done. Total Samples: {len(all_data)}")
-        
-    return all_data[:num_episodes]
+        if (ep + 1) % 2000 == 0:
+            print(f"  Progress: {ep+1}/{num_episodes}")
+            
+    return all_data
 
 # ==========================================
 # 3. Elite Filtering (Distillation)
 # ==========================================
-def filter_elite_data(raw_data, quantile=0.10):
-    """Keep top X% most efficient episodes (Strict Hybrid Selection)"""
-    costs = [d['cost'] for d in raw_data]
-    threshold = np.quantile(costs, quantile)
-    avg_cost = np.mean(costs)
+def filter_elite_data_stratified(raw_data, quantile=0.10):
+    """Filter Top X% per Difficulty Bin (Stratified)"""
+    
+    # 1. Create Bins for Difficulty (Load)
+    # Range of Load is approx 0 to 2,000,000+
+    diffs = [d['difficulty'] for d in raw_data]
+    if len(diffs) == 0: return []
+    
+    # Use 10 quantiles to define bins
+    try:
+        bins = np.quantile(diffs, np.linspace(0, 1, 11))
+    except:
+        bins = np.linspace(min(diffs), max(diffs), 11)
+        
+    grouped = {i: [] for i in range(10)}
+    
+    for d in raw_data:
+        v = d['difficulty']
+        # Find bin
+        bin_idx = 0
+        for i in range(10):
+            if v >= bins[i] and v <= bins[i+1]:
+                bin_idx = i
+                break
+        grouped[bin_idx].append(d)
     
     elite_samples = []
-    for d in raw_data:
-        if d['cost'] <= threshold:
-            elite_samples.extend(d['trajectory'])
-            
-    print(f"\nFiltering Complete:")
-    print(f"  Original Avg Cost: {avg_cost:.2f}")
-    print(f"  Elite Threshold (Top {quantile*100:.1f}%): {threshold:.2f}")
-    print(f"  Elite Samples: {len(elite_samples)} steps")
+    print(f"\nStratified Filtering (Top {quantile*100:.1f}% per Difficulty Bin):")
     
-    return elite_samples
+    for bin_idx, group in grouped.items():
+        if len(group) == 0: continue
+        
+        costs = [d['cost'] for d in group]
+        threshold = np.quantile(costs, quantile)
+        
+        count = 0
+        for d in group:
+            if d['cost'] <= threshold:
+                elite_samples.extend(d['trajectory'])
+                count += 1
+        
+        # print(f"  Bin {bin_idx} (Load {bins[bin_idx]:.0f}-{bins[bin_idx+1]:.0f}): Threshold {threshold:.2f}, Kept {count}")
 
+    print(f"  Total Elite Samples: {len(elite_samples)} steps")
+    return elite_samples
 
 # ==========================================
 # 4. Training Loop
@@ -457,7 +493,7 @@ if __name__ == "__main__":
     raw_data = collect_data(20000)
     
     # 2. Distillation
-    elite_data = filter_elite_data(raw_data, quantile=0.3)
+    elite_data = filter_elite_data_stratified(raw_data, quantile=0.10)
     
     # 3. Train Student
     student = train(elite_data, epochs=500)
