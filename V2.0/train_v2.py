@@ -374,8 +374,7 @@ def collect_data(num_episodes=20000):
                 'difficulty': diff
             })
             
-        if (ep + 1) % 2000 == 0:
-            print(f"  Progress: {ep+1}/{num_episodes}")
+        print(f"  Batch {it+1}/{iterations} [{strategy_name}] Done. Total Samples: {len(all_data)}")
             
     return all_data
 
