@@ -393,8 +393,9 @@ def train(data, epochs=500):
             print(f"  Epoch {epoch+1}: Loss = {total_loss/batches:.4f}")
     
     student.cpu()
-    torch.save(student.state_dict(), "model_v2.pth")
-    print("Student V2.0 Saved: model_v2.pth")
+    model_save_path = os.path.join(current_dir, "model_v2.pth")
+    torch.save(student.state_dict(), model_save_path)
+    print(f"Student V2.0 Saved: {model_save_path}")
     return student.to(device)
 
 def validate(model):
