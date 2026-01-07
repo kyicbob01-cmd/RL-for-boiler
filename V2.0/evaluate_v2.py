@@ -1,6 +1,6 @@
 """
-V2.0 Showdown: Student vs Teacher vs Rules
-hypothesis: V2.0 (Student) > V1.0 (Teacher) > SmartController
+V2.2 Showdown: Student vs Teacher vs Rules
+hypothesis: V2.2 (Unconditional Student) > V1.0 (Teacher) > SmartController
 """
 
 import torch
@@ -20,9 +20,10 @@ from benchmark import BENCHMARK_SCENARIOS
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ==========================================
-# Shared Architecture
+# Model Architectures
 # ==========================================
 class RCPolicy(nn.Module):
+    """V1.0 Architecture (Cost Conditioned)"""
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
@@ -38,6 +39,22 @@ class RCPolicy(nn.Module):
         cost_norm = target_cost / 50.0
         x = torch.cat([state, cost_norm], dim=-1)
         return self.net(x)
+
+class UnconditionalPolicy(nn.Module):
+    """V2.2 Architecture: State -> Action (No Cost Conditioning)"""
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(5, 1024), nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(1024, 1024), nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(1024, 512), nn.ReLU(),
+            nn.Linear(512, 1), nn.Sigmoid()
+        )
+    
+    def forward(self, state):
+        return self.net(state)
 
 # ==========================================
 # Controllers
@@ -63,11 +80,26 @@ class SmartControllerRules:
         elif gap > 0: return 20.0
         else: return 0.0
 
-def load_model(path):
+def load_model_v1(path):
+    """Load V1.0 (RCPolicy)"""
     if not os.path.exists(path):
         print(f"Warning: Model not found at {path}")
         return None
     model = RCPolicy().to(device)
+    try:
+        model.load_state_dict(torch.load(path, map_location=device))
+        model.eval()
+        return model
+    except Exception as e:
+        print(f"Error loading {path}: {e}")
+        return None
+
+def load_model_v2(path):
+    """Load V2.2 (UnconditionalPolicy)"""
+    if not os.path.exists(path):
+        print(f"Warning: Model not found at {path}")
+        return None
+    model = UnconditionalPolicy().to(device)
     try:
         model.load_state_dict(torch.load(path, map_location=device))
         model.eval()
@@ -95,7 +127,7 @@ def run_simulation(controller_type, model=None, scenario=None):
         power = 0.0
         if controller_type == "SC":
             power = sc.decide(physics.boiler_temp, physics.units)
-        else: # RCP
+        elif controller_type == "V1.0": # RCP with cost conditioning
             obs = torch.tensor([[
                 physics.boiler_temp / 300.0,
                 max_t / 300.0,
@@ -105,6 +137,15 @@ def run_simulation(controller_type, model=None, scenario=None):
             target = torch.tensor([[5.0]], dtype=torch.float32).to(device)
             with torch.no_grad():
                 power = model(obs, target).item() * 100.0
+        else: # V2.2 Unconditional
+            obs = torch.tensor([[
+                physics.boiler_temp / 300.0,
+                max_t / 300.0,
+                active / 4.0,
+                0.0, load / 2000000.0
+            ]], dtype=torch.float32).to(device)
+            with torch.no_grad():
+                power = model(obs).item() * 100.0
         
         physics.step(power, dt=0.5)
         
@@ -115,15 +156,15 @@ def run_simulation(controller_type, model=None, scenario=None):
 # ==========================================
 def evaluate_all():
     print("="*80)
-    print("V2.0 FINAL SHOWDOWN: Student vs Teacher vs Rules")
+    print("V2.2 FINAL SHOWDOWN: Unconditional Student vs Teacher vs Rules")
     print("="*80)
     
     # Load Models
     teacher_path = os.path.join(current_dir, "..", "V1.0", "model.pth")
     student_path = os.path.join(current_dir, "model_v2.pth")
     
-    teacher = load_model(teacher_path)
-    student = load_model(student_path)
+    teacher = load_model_v1(teacher_path)
+    student = load_model_v2(student_path)
     
     if student is None:
         print("CRITICAL: model_v2.pth NOT FOUND. Please run train_v2.py first.")

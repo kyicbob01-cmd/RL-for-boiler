@@ -1,7 +1,10 @@
 """
-Return-Conditioned Policy V2.0 (Self-Evolution)
-Teacher: V1.0 Model (Ambitious Mode)
-Student: V2.0 Model (Learns from Elite Trajectories)
+Return-Conditioned Policy V2.2 (Unconditional Elite Cloning)
+Teacher: V1.0 Model (RCP with Cost Input)
+Student: V2.2 Model (Unconditional - State Only)
+
+Key Insight: Since we only train on Elite data, the "desired cost" is implicitly
+the minimum achievable. We don't need to condition on cost anymore.
 """
 
 import numpy as np
@@ -23,9 +26,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # ==========================================
-# 0. Model Architecture (Shared)
+# 0. Model Architectures
 # ==========================================
 class RCPolicy(nn.Module):
+    """Legacy V1.0 Architecture (for loading Teacher)"""
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
@@ -41,6 +45,22 @@ class RCPolicy(nn.Module):
         cost_norm = target_cost / 50.0
         x = torch.cat([state, cost_norm], dim=-1)
         return self.net(x)
+
+class UnconditionalPolicy(nn.Module):
+    """V2.2 Architecture: State -> Action (No Cost Conditioning)"""
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(5, 1024), nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(1024, 1024), nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(1024, 512), nn.ReLU(),
+            nn.Linear(512, 1), nn.Sigmoid()
+        )
+    
+    def forward(self, state):
+        return self.net(state)
 
 # ==========================================
 # 1. Controllers (Teacher & Rules)
@@ -431,16 +451,16 @@ def filter_elite_data_stratified(raw_data, quantile=0.10):
 # 4. Training Loop
 # ==========================================
 def train(data, epochs=500):
-    print(f"\nTraining Student V2.0 ({epochs} Epochs)...")
+    print(f"\nTraining Student V2.2 (Unconditional, {epochs} Epochs)...")
     
     states = torch.tensor(np.array([d['state'] for d in data], dtype=np.float32)).to(device)
     actions = torch.tensor(np.array([[d['action']] for d in data], dtype=np.float32)).to(device)
-    costs = torch.tensor(np.array([[d['final_cost']] for d in data], dtype=np.float32)).to(device)
+    # Note: We no longer use costs as input
     
     BATCH_SIZE = 32768
     num_samples = states.shape[0]
     
-    student = RCPolicy().to(device)
+    student = UnconditionalPolicy().to(device)
     torch.set_float32_matmul_precision('high')
 
     opt = optim.Adam(student.parameters(), lr=1e-3)
@@ -453,7 +473,7 @@ def train(data, epochs=500):
         
         for start in range(0, num_samples, BATCH_SIZE):
             idx = indices[start : start + BATCH_SIZE]
-            pred = student(states[idx], costs[idx])
+            pred = student(states[idx]) # No cost input
             loss = loss_fn(pred, actions[idx])
             opt.zero_grad(); loss.backward(); opt.step()
             total_loss += loss.item(); batches += 1
@@ -465,11 +485,11 @@ def train(data, epochs=500):
     student.cpu()
     model_save_path = os.path.join(current_dir, "model_v2.pth")
     torch.save(student.state_dict(), model_save_path)
-    print(f"Student V2.0 Saved: {model_save_path}")
+    print(f"Student V2.2 Saved: {model_save_path}")
     return student.to(device)
 
 def validate(model):
-    print("\nValidating Student V2.0...")
+    print("\nValidating Student V2.2...")
     model.eval()
     for scenario in BENCHMARK_SCENARIOS[:5]:
         physics = BoilerPhysics()
@@ -482,8 +502,7 @@ def validate(model):
                 max_t, active, load = physics.get_system_state()
                 if active == 0: break
                 obs = torch.tensor([[physics.boiler_temp/300.0, max_t/300.0, active/4.0, 0.0, load/2000000.0]], dtype=torch.float32).to(device)
-                target = torch.tensor([[5.0]], dtype=torch.float32).to(device)
-                power = model(obs, target).item() * 100.0
+                power = model(obs).item() * 100.0 # No cost input
                 physics.step(power, dt=0.5)
         print(f"  {scenario['name']}: {physics.total_cost:.2f}")
 
@@ -499,3 +518,4 @@ if __name__ == "__main__":
     
     # 4. Quick Check
     validate(student)
+
