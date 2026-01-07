@@ -43,7 +43,7 @@ class RCPolicy(nn.Module):
         return self.net(x)
 
 # ==========================================
-# 1. Teacher Agent (V1.0)
+# 1. Controllers (Teacher & Rules)
 # ==========================================
 class RCPTeacher:
     def __init__(self):
@@ -57,33 +57,77 @@ class RCPTeacher:
         else:
             raise FileNotFoundError(f"Teacher model not found at {v1_path}")
 
-    def decide(self, physics, noise_scale=0.05):
-        """
-        Teacher Decision with Exploration Noise
-        noise_scale: Standard deviation of Gaussian noise added to action
-        """
-        max_t, active, load = physics.get_system_state()
+class SmartControllerGPU:
+    """Vectorized Rule-Based Controller for GPU Batching"""
+    def decide(self, env):
+        # env is BatchedBoilerPhysics
+        # 1. Identify Needed Units (Active & Current < Target - 0.5)
+        # u_state != 2 (Finished) is already checked in env.u_active usually, 
+        # but let's be safe: Active & Heating/Holding & Below Target
         
-        obs = torch.tensor([[
-            physics.boiler_temp / 300.0,
-            max_t / 300.0,
-            active / 4.0,
-            0.0, # Rate assumption
-            load / 2000000.0
-        ]], dtype=torch.float32).to(device)
+        # (N, 4)
+        is_needed = env.u_active & (env.u_current < env.u_target - 0.5) & (env.u_state != 2)
         
-        # Ambitious Target for Teacher
-        target = torch.tensor([[5.0]], dtype=torch.float32).to(device)
+        # 2. Calculate Max Target of Needed Units
+        # If no units needed, max_t = 0. We use masked_fill to handle empty rows.
+        # Clone to avoid modifying env
+        targets = env.u_target.clone()
+        targets[~is_needed] = -1.0 # Mask out unneeded
         
-        with torch.no_grad():
-            action = self.model(obs, target).item()
-            
-        # Add Exploration Noise
-        if noise_scale > 0:
-            action += np.random.normal(0, noise_scale)
-            action = np.clip(action, 0.0, 1.0)
-            
-        return action * 100.0
+        max_target_needed = targets.max(dim=1)[0] # (N,)
+        max_current_needed = (env.u_current * is_needed.float()).max(dim=1)[0]
+        
+        # Boiler Target Logic
+        # target_boiler = max(max_t + 5.0, max_current + 6.0)
+        target_boiler = torch.max(max_target_needed + 5.0, max_current_needed + 6.0)
+        
+        # If no units needed, logic says:
+        # Check holding: (Active & Holding). If boiler < min(holding_target) + 3.0 -> 30%
+        # Else 0.0
+        
+        has_needed = is_needed.any(dim=1)
+        
+        # Holding Logic for those with NO needed units
+        is_holding = env.u_active & (env.u_state == 1)
+        holding_targets = env.u_target.clone()
+        holding_targets[~is_holding] = 9999.0 # Large val for min
+        min_holding_target = holding_targets.min(dim=1)[0]
+        
+        needs_hold_heat = (min_holding_target < 9999.0) & (env.boiler_temp < min_holding_target + 3.0)
+        
+        # 3. Calculate Gap
+        gap = target_boiler - env.boiler_temp
+        
+        # 4. Determine Power (Standard Logic)
+        # gap < -2: 0
+        # gap > 20: 100
+        # gap > 10: 80
+        # gap > 5: 50
+        # gap > 0: 20
+        # else 0
+        
+        power = torch.zeros(env.n, device=env.device)
+        
+        # Vectorized Conditions
+        p_100 = gap > 20
+        p_80 = (gap <= 20) & (gap > 10)
+        p_50 = (gap <= 10) & (gap > 5)
+        p_20 = (gap <= 5) & (gap > 0)
+        
+        power[p_100] = 100.0
+        power[p_80] = 80.0
+        power[p_50] = 50.0
+        power[p_20] = 20.0
+        
+        # Apply Logic Masks
+        # Case A: Has Needed Units -> Use Gap Power
+        # Case B: No Needed, But Needs Hold Heat -> 30.0
+        # Case C: Else -> 0.0
+        
+        final_power = torch.where(has_needed, power, 
+                                  torch.where(needs_hold_heat, torch.tensor(30.0, device=env.device), torch.tensor(0.0, device=env.device)))
+                                  
+        return final_power
 
 # ==========================================
 # 2. Optimized Data Collection (GPU Batched)
@@ -145,10 +189,6 @@ class BatchedBoilerPhysics:
         
     def get_state(self):
         # Calculate derived features for observation
-        # Max Target (N, 1)
-        # Active Count (N, 1)
-        # Total Load (N, 1)
-        
         max_t = self.u_target.max(dim=1)[0]
         
         # Active: State != 2 (Finished) AND Is Active Unit
@@ -176,8 +216,7 @@ class BatchedBoilerPhysics:
         to_hold = (self.u_state == 0) & (self.u_current >= self.u_target - 0.5)
         self.u_state[to_hold] = 1
         
-        # Holding -> Finished if duration <= 0 (Logic: duration decrement)
-        # Decrement duration if State == 1 (Holding) AND Temp >= Target - 3.0
+        # Holding -> Finished logic
         holding_ok = (self.u_state == 1) & (self.u_current >= self.u_target - 3.0)
         self.u_duration[holding_ok] -= self.dt
         
@@ -185,14 +224,10 @@ class BatchedBoilerPhysics:
         self.u_state[to_finish] = 2
         
         # 2. Valve Logic
-        # Open if (Heating OR Holding) AND (Current < Target - 0.5) AND (Boiler > Current)
-        # Close if (Current > Target + 0.5)
-        # Simplify: Standard thermostat
         needs_heat = (self.u_state <= 1) & self.u_active
         valve_open = needs_heat & (self.u_current < self.u_target - 0.5) & (self.boiler_temp.unsqueeze(1) > self.u_current)
         
         # 3. Heat Transfer
-        # Transfer = Delta * Coeff
         delta = torch.clamp(self.boiler_temp.unsqueeze(1) - self.u_current, min=0)
         transfer_rate = delta * self.transfer_coeff * valve_open.float()
         
@@ -201,8 +236,6 @@ class BatchedBoilerPhysics:
         loss_rate_closed = (self.u_current - self.T_env) * 0.2
         
         # Update Unit Temp
-        # If open: (Transfer - Loss) / Mass
-        # If closed: (-Loss) / Mass
         net_heat = torch.where(valve_open, transfer_rate - loss_rate, -loss_rate_closed)
         self.u_current += (net_heat / self.u_thermal_mass) * self.dt
         
@@ -214,34 +247,36 @@ class BatchedBoilerPhysics:
         self.boiler_temp += b_change * self.dt
         
         # Check global finish
-        # Finished if ALL active units are state 2
-        # If a unit is NOT active, treat as finished.
-        # So we check if ANY (Active AND State!=2) exists.
         any_working = ((self.u_state != 2) & self.u_active).any(dim=1)
         self.finished = ~any_working
 
         return self.finished
 
 def collect_data(num_episodes=20000):
-    BATCH_SIZE = 2048 # Maximize GPU
+    BATCH_SIZE = 2048
     iterations = (num_episodes // BATCH_SIZE) + 1
     
-    print(f"Collecting Data on GPU (Batch={BATCH_SIZE}, Iters={iterations})...")
+    print(f"Collecting Self-Play (Teacher) & Rules Data on GPU...")
+    print(f"  Target Episodes: {num_episodes}")
+    print(f"  Policy Mix: 50% Teacher (Noise=0.15) | 50% Rules")
     
     teacher = RCPTeacher()
-    all_data = [] # List of dicts (CPU) - Try to keep on CPU to save GPU VRAM
+    rules = SmartControllerGPU()
+    
+    all_data = [] 
     
     env = BatchedBoilerPhysics(BATCH_SIZE, device)
     
     for it in range(iterations):
         env.reset_random()
         
-        # Trajectory Buffers
-        # We need to store (S, A, C) for 2000 steps for B batches
-        # Pre-allocate large tensors on Host memory to avoid GPU OOM
-        # Actually 2048 * 2000 * floats is fine (16MB).
+        # Alternating Strategies: Even iterations -> Teacher, Odd -> Rules
+        # Or mixed batch? Mixed batch is harder to implement efficient branching.
+        # Let's do even/odd batches.
         
-        # We'll accumulate lists and stack later
+        use_rules = (it % 2 != 0)
+        strategy_name = "Rules" if use_rules else "Teacher"
+        
         states_list = []
         actions_list = []
         
@@ -249,7 +284,7 @@ def collect_data(num_episodes=20000):
         traj_lengths = torch.zeros(BATCH_SIZE, dtype=torch.long, device=device)
         
         prev_temp = env.boiler_temp.clone()
-        noise = 0.05
+        noise_level = 0.15 if not use_rules else 0.0 # Aggressive Noise for Teacher
         
         for step in range(2000):
             # 1. Get State
@@ -266,33 +301,28 @@ def collect_data(num_episodes=20000):
                 load / 2000000.0
             ], dim=1)
             
-            # 2. Teacher Inference (Batched)
-            # Ambitious Target
-            target_val = torch.ones((BATCH_SIZE, 1), device=device) * 5.0
-            with torch.no_grad():
-                 # Teacher model expects (N, 5)
-                 # Teacher decide fn was single item. We invoke model directly.
-                 # RCPModel forward: cat(state, target/50)
-                 preds = teacher.model(obs, target_val)
-                 
-                 # Add noise
-                 noise_t = torch.randn_like(preds) * noise
-                 actions = torch.clamp(preds + noise_t, 0.0, 1.0)
-                 
-            power_vals = actions.squeeze() * 100.0
+            # 2. Decide Power
+            if use_rules:
+                power_vals = rules.decide(env) # Direct GPU logic, returns 0-100
+                actions = power_vals / 100.0 # Normalize for saving
+            else:
+                target_val = torch.ones((BATCH_SIZE, 1), device=device) * 5.0
+                with torch.no_grad():
+                     preds = teacher.model(obs, target_val)
+                     noise_t = torch.randn_like(preds) * noise_level
+                     actions = torch.clamp(preds + noise_t, 0.0, 1.0)
+                power_vals = actions.squeeze() * 100.0
+
             power_vals = torch.where(active_mask, power_vals, torch.zeros_like(power_vals))
             
             # 3. Step
             dones = env.step(power_vals)
             
             # 4. Store
-            states_list.append(obs.cpu()) # Move to CPU to save VRAM? Or keep GPU. CPU is safer for lists.
+            states_list.append(obs.cpu()) 
             actions_list.append(actions.cpu())
             
-            # Update Active Mask
-            # If done, mask out. But we must continue stepping others.
-            # Just set power to 0 for done envs (handled above).
-            # But we record length.
+            # Update Active
             just_finished = dones & active_mask
             traj_lengths[just_finished] = step + 1
             active_mask = active_mask & ~dones
@@ -301,29 +331,33 @@ def collect_data(num_episodes=20000):
                 break
                 
         # End of Episode
-        # Process results
         final_costs = env.total_cost.cpu().numpy()
         lens = traj_lengths.cpu().numpy()
         
-        # Convert lists of tensors to Tensor (Steps, B, F)
         S = torch.stack(states_list).numpy() # (T, B, 5)
         A = torch.stack(actions_list).numpy() # (T, B, 1)
         
-        # Unpack into episodes
         for i in range(BATCH_SIZE):
             length = lens[i]
-            if length == 0: length = 2000 # Max steps if never finished
+            if length == 0: length = 2000
             
             traj = []
             c = final_costs[i]
             
             s_ep = S[:length, i, :]
-            a_ep = A[:length, i, :]
+            actions_norm = A[:length, i, :]
+            # If rules, actions_var shape might be (T, B) or (T, B, 1) depending on how handled
+            # Rules decide returns (N,), so A will be (T, N). Reshape if needed.
             
             for t in range(length):
+                act = actions_norm[t]
+                if isinstance(act, np.ndarray): 
+                     if act.size > 1: act = act[0] # Handle shape
+                     else: act = float(act)
+                
                 traj.append({
                     'state': s_ep[t],
-                    'action': a_ep[t][0], # scalar
+                    'action': act, 
                     'final_cost': c
                 })
             
@@ -332,15 +366,15 @@ def collect_data(num_episodes=20000):
                 'cost': c
             })
             
-        print(f"  Batch {it+1}/{iterations} Done. Total Samples: {len(all_data)}")
+        print(f"  Batch {it+1}/{iterations} [{strategy_name}] Done. Total Samples: {len(all_data)}")
         
     return all_data[:num_episodes]
 
 # ==========================================
 # 3. Elite Filtering (Distillation)
 # ==========================================
-def filter_elite_data(raw_data, quantile=0.3):
-    """Keep top X% most efficient episodes"""
+def filter_elite_data(raw_data, quantile=0.10):
+    """Keep top X% most efficient episodes (Strict Hybrid Selection)"""
     costs = [d['cost'] for d in raw_data]
     threshold = np.quantile(costs, quantile)
     avg_cost = np.mean(costs)
@@ -352,10 +386,11 @@ def filter_elite_data(raw_data, quantile=0.3):
             
     print(f"\nFiltering Complete:")
     print(f"  Original Avg Cost: {avg_cost:.2f}")
-    print(f"  Elite Threshold (Top {quantile*100}%): {threshold:.2f}")
+    print(f"  Elite Threshold (Top {quantile*100:.1f}%): {threshold:.2f}")
     print(f"  Elite Samples: {len(elite_samples)} steps")
     
     return elite_samples
+
 
 # ==========================================
 # 4. Training Loop
