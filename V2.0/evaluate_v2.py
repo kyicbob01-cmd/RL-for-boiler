@@ -41,11 +41,11 @@ class RCPolicy(nn.Module):
         return self.net(x)
 
 class UnconditionalPolicy(nn.Module):
-    """V2.2 Architecture: State -> Action (No Cost Conditioning)"""
+    """V2.4 Architecture: Time-Aware State -> Action"""
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(5, 1024), nn.ReLU(),
+            nn.Linear(6, 1024), nn.ReLU(),  # 6D state: +min_remaining_time
             nn.Dropout(0.1),
             nn.Linear(1024, 1024), nn.ReLU(),
             nn.Dropout(0.1),
@@ -119,10 +119,14 @@ def run_simulation(controller_type, model=None, scenario=None):
         physics.add_unit(task["name"], task["target"], task["duration"], task["weight"])
     
     sc = SmartControllerRules()
+    prev_temp = physics.boiler_temp
     
     for _ in range(2000):
-        max_t, active, load = physics.get_system_state()
+        max_t, active, load, min_time = physics.get_system_state()
         if active == 0: break
+        
+        rate = physics.boiler_temp - prev_temp
+        prev_temp = physics.boiler_temp
         
         power = 0.0
         if controller_type == "SC":
@@ -137,12 +141,14 @@ def run_simulation(controller_type, model=None, scenario=None):
             target = torch.tensor([[5.0]], dtype=torch.float32).to(device)
             with torch.no_grad():
                 power = model(obs, target).item() * 100.0
-        else: # V2.2 Unconditional
+        else: # V2.4 Time-Aware Unconditional
             obs = torch.tensor([[
                 physics.boiler_temp / 300.0,
                 max_t / 300.0,
                 active / 4.0,
-                0.0, load / 2000000.0
+                rate,
+                load / 2000000.0,
+                min_time / 500.0
             ]], dtype=torch.float32).to(device)
             with torch.no_grad():
                 power = model(obs).item() * 100.0
@@ -156,7 +162,7 @@ def run_simulation(controller_type, model=None, scenario=None):
 # ==========================================
 def evaluate_all():
     print("="*80)
-    print("V2.2 FINAL SHOWDOWN: Unconditional Student vs Teacher vs Rules")
+    print("V2.4 FINAL SHOWDOWN: Time-Aware Student vs Teacher vs Adaptive SC")
     print("="*80)
     
     # Load Models

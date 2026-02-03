@@ -105,26 +105,72 @@ class SmartController:
         return self._rule_based_fallback(temp, units)
     
     def _rule_based_fallback(self, temp, units):
+        """Time-Aware SmartController (Optimized 2024-01)
+        Features:
+        - Adaptive heating margins by temperature zone
+        - Time-aware finishing (reduce power near task end)
+        """
         active = [u for u in units.values() if u['state'] != '完成']
         if not active: return 0.0
         
-        needed = [u for u in active if u['current'] < u['target'] - 0.5]
-        targets = [u['target'] for u in needed]
+        heating = [u for u in active if u['state'] == '加熱']
+        holding = [u for u in active if u['state'] == '保溫']
         
-        if not targets:
-            holding = [u['target'] for u in active if u['state'] == '保溫']
-            if holding and temp < min(holding) + 3.0: return 30.0
-            return 0.0
+        # Get max target and select margins
+        all_targets = [u['target'] for u in active]
+        max_target = max(all_targets)
         
-        target_boiler = max(max(targets) + 5.0, max([u['current'] for u in needed]) + 6.0)
-        gap = target_boiler - temp
+        if max_target < 100:
+            heat_margin, hold_margin = 8, 1
+        elif max_target < 150:
+            heat_margin, hold_margin = 20, 2
+        else:
+            heat_margin, hold_margin = 40, 2
         
-        if gap < -2.0: return 0.0
-        elif gap > 20: return 100.0
-        elif gap > 10: return 80.0
-        elif gap > 5: return 50.0
-        elif gap > 0: return 20.0
-        else: return 0.0
+        # Phase 1: HEATING (Bang-Bang)
+        if heating:
+            heat_target = max([u['target'] for u in heating])
+            target_boiler = heat_target + heat_margin
+            
+            if temp < target_boiler:
+                return 100.0  # Full power
+            else:
+                return 0.0    # Coast
+        
+        # Phase 2: HOLDING (Time-Aware)
+        if holding:
+            hold_target = max([u['target'] for u in holding])
+            min_remaining = min([u['left'] for u in holding])
+            
+            # TIME-AWARE FINISHING LOGIC
+            if min_remaining <= 15:
+                # Last 15 seconds: stop heating, coast to finish
+                return 0.0
+            elif min_remaining <= 30:
+                # Last 30 seconds: minimal power
+                target_boiler = hold_target  # Exact target, no margin
+                gap = target_boiler - temp
+                if gap > 1: return 15.0
+                else: return 0.0
+            else:
+                # Normal holding
+                target_boiler = hold_target + hold_margin
+                gap = target_boiler - temp
+                
+                boiler_loss = (temp - 25.0) * 4.0
+                required_kw = boiler_loss / (50.0 * 0.9)
+                required_pct = (required_kw / 100.0) * 100.0 * 1.2
+                
+                if gap > 3:
+                    return min(100, max(40, required_pct))
+                elif gap > 0:
+                    return min(100, max(15, required_pct))
+                elif gap < -2:
+                    return 0.0
+                else:
+                    return min(100, max(10, required_pct))
+        
+        return 0.0
 
 class Engine:
     def __init__(self): self.reset()

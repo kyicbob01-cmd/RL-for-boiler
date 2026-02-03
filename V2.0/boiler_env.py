@@ -51,6 +51,7 @@ class BoilerPhysics:
         max_t = 0.0
         active_count = 0
         total_thermal_load = 0.0
+        min_remaining_time = 9999.0  # Large default
         
         for u in self.units.values():
             if u['state'] != 'FINISHED':
@@ -58,8 +59,15 @@ class BoilerPhysics:
                 if u['target'] > max_t: max_t = u['target']
                 gap = max(0, u['target'] - u['current'])
                 total_thermal_load += gap * u['weight']
+                # Track minimum remaining holding time
+                if u['state'] == 'HOLDING' and u['duration_left'] < min_remaining_time:
+                    min_remaining_time = u['duration_left']
+        
+        # If no holding units, return 0
+        if min_remaining_time >= 9999.0:
+            min_remaining_time = 0.0
                 
-        return max_t, active_count, total_thermal_load
+        return max_t, active_count, total_thermal_load, min_remaining_time
 
     def step(self, power_percent, dt=None):
         if dt is None: dt = self.time_step_base
