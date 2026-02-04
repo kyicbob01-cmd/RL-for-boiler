@@ -11,11 +11,9 @@ import torch.nn as nn
 import os
 import sys
 
-# Add current directory to path to ensure imports work
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
-from train import RCPolicy
 from benchmark import BENCHMARK_SCENARIOS
 
 matplotlib.use('TkAgg')
@@ -26,8 +24,6 @@ try:
     windll.shcore.SetProcessDpiAwareness(1)
 except: pass
 
-# ... (Colors and Fonts remain the same) ...
-# Colors (Industrial Theme)
 C = {
     'bg_app': '#d4d4d4', 'bg_panel': '#e6e6e6', 'bg_content': '#ffffff',
     'border_light': '#ffffff', 'border_dark': '#808080', 'border_frame': '#999999',
@@ -38,7 +34,6 @@ C = {
     'human_color': '#b00000', 'ai_color': '#000080',
 }
 
-# Fonts
 F = {
     'h1': ("Microsoft JhengHei", 16, "bold"),
     'h2': ("Microsoft JhengHei", 14, "bold"),
@@ -48,8 +43,22 @@ F = {
     'tag': ("Segoe UI", 10),
 }
 
-# Sync Scenarios with Benchmark
 SCENARIOS = {f"{s['name']}": s['tasks'] for s in BENCHMARK_SCENARIOS}
+
+class ESPolicy(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(6, 512), nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 512), nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 256), nn.ReLU(),
+            nn.Linear(256, 1), nn.Sigmoid()
+        )
+    
+    def forward(self, state):
+        return self.net(state)
 
 class SmartController:
     def __init__(self):
@@ -57,21 +66,20 @@ class SmartController:
         self.use_ai = False
         self.model_type = "rules"
         
-        # Robust Model Loading
-        model_path = os.path.join(current_dir, "model.pth")
+        v3_model_path = os.path.join(current_dir, "..", "V3.0", "model_es_final.pth")
         
-        if os.path.exists(model_path):
+        if os.path.exists(v3_model_path):
             try:
-                self.model = RCPolicy()
-                self.model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
+                self.model = ESPolicy()
+                self.model.load_state_dict(torch.load(v3_model_path, map_location=torch.device('cpu')))
                 self.model.eval()
                 self.use_ai = True
-                self.model_type = "rcp"
-                print(f">>> RCP V1.0 Loaded from {model_path} <<<")
+                self.model_type = "es"
+                print(f">>> V3.0 ES Model Loaded from {v3_model_path} <<<")
             except Exception as e:
-                print(f"RCP Load Failed: {e}")
+                print(f"ES Model Load Failed: {e}")
         else:
-            print(f"Warning: model.pth not found at {model_path}")
+            print(f"Warning: V3.0 model not found at {v3_model_path}")
         
         if not self.use_ai: print("Rule Controller Active (Fallback)")
 
@@ -81,22 +89,36 @@ class SmartController:
                 active_count = 0
                 max_target = 0
                 total_load = 0
+                min_remaining_time = 9999.0
+                
+                prev_temp = getattr(self, '_prev_temp', temp)
+                rate = temp - prev_temp
+                self._prev_temp = temp
+                
                 for u in units.values():
                     if u['state'] != '完成':
                         active_count += 1
                         if u['target'] > max_target: max_target = u['target']
                         gap = max(0, u['target'] - u['current'])
                         total_load += gap * u['weight'] * 1.2
+                        if u['state'] == '保溫' and u['left'] < min_remaining_time:
+                            min_remaining_time = u['left']
                 
-                obs = [temp/300.0, max_target/300.0, active_count/4.0, 0.0, total_load/2000000.0]
+                if min_remaining_time >= 9999.0:
+                    min_remaining_time = 0.0
                 
-                if self.model_type == 'rcp':
-                    obs_t = torch.tensor([obs], dtype=torch.float32)
-                    # Use Ambitious Target Cost = 5.0
-                    target_t = torch.tensor([[5.0]], dtype=torch.float32)
-                    with torch.no_grad():
-                        power = self.model(obs_t, target_t).item() * 100.0
-                    return power
+                obs = torch.tensor([[
+                    temp / 300.0,
+                    max_target / 300.0,
+                    active_count / 4.0,
+                    rate,
+                    total_load / 2000000.0,
+                    min_remaining_time / 500.0
+                ]], dtype=torch.float32)
+                
+                with torch.no_grad():
+                    power = self.model(obs).item() * 100.0
+                return power
 
             except Exception as e:
                 print(f"AI Error: {e}")
@@ -105,18 +127,12 @@ class SmartController:
         return self._rule_based_fallback(temp, units)
     
     def _rule_based_fallback(self, temp, units):
-        """Time-Aware SmartController (Optimized 2024-01)
-        Features:
-        - Adaptive heating margins by temperature zone
-        - Time-aware finishing (reduce power near task end)
-        """
         active = [u for u in units.values() if u['state'] != '完成']
         if not active: return 0.0
         
         heating = [u for u in active if u['state'] == '加熱']
         holding = [u for u in active if u['state'] == '保溫']
         
-        # Get max target and select margins
         all_targets = [u['target'] for u in active]
         max_target = max(all_targets)
         
@@ -127,33 +143,27 @@ class SmartController:
         else:
             heat_margin, hold_margin = 40, 2
         
-        # Phase 1: HEATING (Bang-Bang)
         if heating:
             heat_target = max([u['target'] for u in heating])
             target_boiler = heat_target + heat_margin
             
             if temp < target_boiler:
-                return 100.0  # Full power
+                return 100.0
             else:
-                return 0.0    # Coast
+                return 0.0
         
-        # Phase 2: HOLDING (Time-Aware)
         if holding:
             hold_target = max([u['target'] for u in holding])
             min_remaining = min([u['left'] for u in holding])
             
-            # TIME-AWARE FINISHING LOGIC
             if min_remaining <= 15:
-                # Last 15 seconds: stop heating, coast to finish
                 return 0.0
             elif min_remaining <= 30:
-                # Last 30 seconds: minimal power
-                target_boiler = hold_target  # Exact target, no margin
+                target_boiler = hold_target
                 gap = target_boiler - temp
                 if gap > 1: return 15.0
                 else: return 0.0
             else:
-                # Normal holding
                 target_boiler = hold_target + hold_margin
                 gap = target_boiler - temp
                 
@@ -250,7 +260,7 @@ class IndustrialRender:
 class ProfessionalHMI:
     def __init__(self, root):
         self.root = root
-        self.root.title("工業鍋爐控制系統 V1.0 (Boiler SCADA)")
+        self.root.title("工業鍋爐控制系統 V3.0 (Boiler SCADA)")
         self.root.geometry("1920x1080")
         self.root.resizable(False, False)
         self.root.configure(bg=C['bg_app'])
@@ -267,7 +277,7 @@ class ProfessionalHMI:
         toolbar = tk.Frame(self.root, bg=C['bg_app'], height=60, bd=1, relief='raised')
         toolbar.pack(fill=tk.X, side=tk.TOP)
         
-        tk.Label(toolbar, text="🏭 鍋爐控制 SCADA", font=F['h1'], bg=C['bg_app']).pack(side=tk.LEFT, padx=20)
+        tk.Label(toolbar, text="鍋爐控制 SCADA", font=F['h1'], bg=C['bg_app']).pack(side=tk.LEFT, padx=20)
         
         ctrl_frame = tk.Frame(toolbar, bg=C['bg_app'])
         ctrl_frame.pack(side=tk.LEFT, padx=50)
@@ -341,10 +351,10 @@ class ProfessionalHMI:
             ai_status_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
             
             if self.ctrl.use_ai:
-                status_text = "🧠 RCP Agent\n(Ambitious Mode)"
+                status_text = "V3.0 ES Agent\n(Evolution Strategy)"
                 status_color = C['status_active']
             else:
-                status_text = "🔧 規則控制\n(Rule-Based)"
+                status_text = "規則控制\n(Rule-Based)"
                 status_color = C['status_run']
             
             tk.Label(ai_status_frame, text=status_text, font=F['body'], bg=C['bg_panel'], fg=status_color).pack(expand=True)
@@ -366,7 +376,7 @@ class ProfessionalHMI:
         if engine.kw > 0:
             c_fire = C['status_warn'] if engine.kw < 80 else C['status_alarm']
             canvas.create_oval(boiler_x-15, boiler_y+20, boiler_x+15, boiler_y+50, fill=c_fire, outline='')
-            canvas.create_text(boiler_x, boiler_y+35, text="🔥", font=("Segoe UI", 16))
+            canvas.create_text(boiler_x, boiler_y+35, text="FIRE", font=("Segoe UI", 10, "bold"))
         
         canvas.create_rectangle(boiler_x-30, boiler_y-40, boiler_x+30, boiler_y-10, fill='black')
         canvas.create_text(boiler_x, boiler_y-25, text=f"{engine.temp:.1f}", fill='red', font=F['num'])

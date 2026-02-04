@@ -1,9 +1,3 @@
-"""
-V3.0 Self-Improvement Training
-Stage 1: Behavior Cloning (mimic Time-Aware SC)
-Stage 2: Self-Improvement (iterative improvement via cost comparison)
-"""
-
 import os
 import sys
 import copy
@@ -13,7 +7,6 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-# Setup paths
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 
@@ -21,14 +14,10 @@ from boiler_env import BoilerPhysics
 from benchmark import BENCHMARK_SCENARIOS
 from time_aware_sc import TimeAwareSC
 
-# Device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"[V3.0] Device: {device}")
 torch.set_float32_matmul_precision('high')
 
-# ==========================================
-# Policy Network (Same as BC, 6D input)
-# ==========================================
 class Policy(nn.Module):
     def __init__(self):
         super().__init__()
@@ -44,11 +33,7 @@ class Policy(nn.Module):
     def forward(self, state):
         return self.net(state)
 
-# ==========================================
-# Run Scenario with Model
-# ==========================================
 def run_scenario_with_model(model, scenario):
-    """Run a scenario with given model, return cost"""
     physics = BoilerPhysics()
     physics.reset()
     
@@ -82,7 +67,6 @@ def run_scenario_with_model(model, scenario):
     return physics.total_cost
 
 def evaluate_on_benchmarks(model):
-    """Evaluate model on all benchmark scenarios"""
     model.eval()
     costs = {}
     for scenario in BENCHMARK_SCENARIOS:
@@ -90,11 +74,7 @@ def evaluate_on_benchmarks(model):
         costs[scenario['name']] = cost
     return costs
 
-# ==========================================
-# Stage 1: Behavior Cloning
-# ==========================================
 def stage1_behavior_cloning(num_episodes=5000, epochs=300, batch_size=32768):
-    """Train model to mimic Time-Aware SC"""
     print("\n" + "="*70)
     print("[Stage 1] Behavior Cloning - Mimicking Time-Aware SC")
     print("="*70)
@@ -106,7 +86,6 @@ def stage1_behavior_cloning(num_episodes=5000, epochs=300, batch_size=32768):
     print(f"Collecting {num_episodes} episodes...")
     
     for ep in range(num_episodes):
-        # Scenario selection
         if ep < len(BENCHMARK_SCENARIOS) * 20:
             scenario = BENCHMARK_SCENARIOS[ep % len(BENCHMARK_SCENARIOS)]
         else:
@@ -154,23 +133,20 @@ def stage1_behavior_cloning(num_episodes=5000, epochs=300, batch_size=32768):
         if (ep + 1) % 500 == 0:
             print(f"  Progress: {ep+1}/{num_episodes}, Samples: {len(all_states)}")
     
-    # Train - GPU-first approach (like V2.0)
     print(f"\nTraining ({epochs} epochs, batch={batch_size})...")
     print(f"  Samples: {len(all_states)}")
     
-    # Transfer to GPU once, train there
     states = torch.tensor(np.array(all_states, dtype=np.float32)).to(device)
     actions = torch.tensor(np.array([[a] for a in all_actions], dtype=np.float32)).to(device)
     num_samples = states.shape[0]
     
-    del all_states, all_actions  # Free CPU memory
+    del all_states, all_actions
     
     model = Policy().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     criterion = nn.MSELoss()
     
     for epoch in range(epochs):
-        # Shuffle on GPU
         indices = torch.randperm(num_samples, device=device)
         total_loss = 0
         batches = 0
@@ -190,17 +166,12 @@ def stage1_behavior_cloning(num_episodes=5000, epochs=300, batch_size=32768):
         if (epoch + 1) % 30 == 0:
             print(f"  Epoch {epoch+1}: Loss = {total_loss/batches:.6f}")
     
-    # Save initial model
     torch.save(model.state_dict(), os.path.join(current_dir, "model_bc.pth"))
     print("[Stage 1] Complete. Saved: model_bc.pth")
     
     return model
 
-# ==========================================
-# Stage 2: Self-Improvement
-# ==========================================
 def generate_training_data(model, num_episodes=1000):
-    """Generate training data from current model's trajectories"""
     all_states = []
     all_actions = []
     
@@ -244,9 +215,8 @@ def generate_training_data(model, num_episodes=1000):
                 
                 state_t = torch.tensor([state], dtype=torch.float32).to(device)
                 
-                # Add exploration noise
                 action = model(state_t).item()
-                action = action + np.random.normal(0, 0.05)  # 5% noise
+                action = action + np.random.normal(0, 0.05)
                 action = np.clip(action, 0, 1)
                 
                 all_states.append(state)
@@ -258,32 +228,27 @@ def generate_training_data(model, num_episodes=1000):
     return np.array(all_states), np.array(all_actions).reshape(-1, 1)
 
 def stage2_self_improvement(initial_model, max_iterations=100, win_threshold=0.6):
-    """Self-improvement via iterative training"""
     print("\n" + "="*70)
     print("[Stage 2] Self-Improvement Training")
     print(f"Win Threshold: {win_threshold*100:.0f}% | Target: 100% beat initial BC")
     print("="*70)
     
-    # Get initial BC baseline costs
     initial_costs = evaluate_on_benchmarks(initial_model)
     print("\nInitial BC Costs (Target to beat):")
     for name, cost in initial_costs.items():
         print(f"  {name}: {cost:.2f}")
     print(f"  TOTAL: {sum(initial_costs.values()):.2f}")
     
-    # Current best model
     best_model = copy.deepcopy(initial_model)
     best_costs = initial_costs.copy()
     
     for iteration in range(max_iterations):
         print(f"\n--- Iteration {iteration+1}/{max_iterations} ---")
         
-        # 1. Generate new training data from current best (more data!)
         states, actions = generate_training_data(best_model, num_episodes=2000)
         
-        # 2. Train a candidate model
         candidate = Policy().to(device)
-        candidate.load_state_dict(best_model.state_dict())  # Start from current best
+        candidate.load_state_dict(best_model.state_dict())
         
         X = torch.tensor(states, dtype=torch.float32).to(device)
         Y = torch.tensor(actions, dtype=torch.float32).to(device)
@@ -291,9 +256,9 @@ def stage2_self_improvement(initial_model, max_iterations=100, win_threshold=0.6
         optimizer = torch.optim.Adam(candidate.parameters(), lr=5e-4)
         criterion = nn.MSELoss()
         
-        for epoch in range(100):  # More epochs
+        for epoch in range(100):
             indices = torch.randperm(len(X), device=device)
-            for start in range(0, len(X), 32768):  # Larger batch
+            for start in range(0, len(X), 32768):
                 idx = indices[start:start+32768]
                 pred = candidate(X[idx])
                 loss = criterion(pred, Y[idx])
@@ -301,10 +266,8 @@ def stage2_self_improvement(initial_model, max_iterations=100, win_threshold=0.6
                 loss.backward()
                 optimizer.step()
         
-        # 3. Evaluate candidate
         candidate_costs = evaluate_on_benchmarks(candidate)
         
-        # 4. Compare with current best
         wins = 0
         for name in BENCHMARK_SCENARIOS:
             name = name['name']
@@ -315,14 +278,12 @@ def stage2_self_improvement(initial_model, max_iterations=100, win_threshold=0.6
         print(f"  Candidate vs Best: {wins}/10 wins ({win_rate*100:.0f}%)")
         print(f"  Candidate Total: {sum(candidate_costs.values()):.2f} | Best Total: {sum(best_costs.values()):.2f}")
         
-        # 5. Update if candidate wins enough
         if win_rate >= win_threshold:
             print(f"  >>> Candidate promoted to new best!")
             best_model = candidate
             best_costs = candidate_costs
             torch.save(best_model.state_dict(), os.path.join(current_dir, "model_best.pth"))
         
-        # 6. Check victory condition: 100% beat initial BC
         victories_vs_initial = sum(1 for name in initial_costs if best_costs[name] < initial_costs[name])
         print(f"  Best vs Initial BC: {victories_vs_initial}/10")
         
@@ -335,11 +296,7 @@ def stage2_self_improvement(initial_model, max_iterations=100, win_threshold=0.6
     torch.save(best_model.state_dict(), os.path.join(current_dir, "model_final.pth"))
     return best_model
 
-# ==========================================
-# Main
-# ==========================================
 if __name__ == "__main__":
-    # Stage 1: Behavior Cloning
     bc_path = os.path.join(current_dir, "model_bc.pth")
     
     if os.path.exists(bc_path):
@@ -349,10 +306,8 @@ if __name__ == "__main__":
     else:
         initial_model = stage1_behavior_cloning()
     
-    # Stage 2: Self-Improvement
     final_model = stage2_self_improvement(initial_model, max_iterations=100, win_threshold=0.6)
     
-    # Final Evaluation
     print("\n" + "="*70)
     print("[Final Evaluation]")
     print("="*70)
@@ -367,7 +322,6 @@ if __name__ == "__main__":
     total_drl = 0
     
     for scenario in BENCHMARK_SCENARIOS:
-        # Run SC
         physics = BoilerPhysics()
         physics.reset()
         for task in scenario["tasks"]:

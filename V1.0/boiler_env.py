@@ -1,7 +1,3 @@
-"""
-Boiler Physics Engine
-Simulates thermodynamics of a central boiler and multiple consumer units.
-"""
 import random
 
 class BoilerPhysics:
@@ -51,7 +47,6 @@ class BoilerPhysics:
         max_t = 0.0
         active_count = 0
         total_thermal_load = 0.0
-        min_remaining_time = 9999.0  # Large default
         
         for u in self.units.values():
             if u['state'] != 'FINISHED':
@@ -59,15 +54,8 @@ class BoilerPhysics:
                 if u['target'] > max_t: max_t = u['target']
                 gap = max(0, u['target'] - u['current'])
                 total_thermal_load += gap * u['weight']
-                # Track minimum remaining holding time
-                if u['state'] == 'HOLDING' and u['duration_left'] < min_remaining_time:
-                    min_remaining_time = u['duration_left']
-        
-        # If no holding units, return 0
-        if min_remaining_time >= 9999.0:
-            min_remaining_time = 0.0
                 
-        return max_t, active_count, total_thermal_load, min_remaining_time
+        return max_t, active_count, total_thermal_load
 
     def step(self, power_percent, dt=None):
         if dt is None: dt = self.time_step_base
@@ -75,7 +63,6 @@ class BoilerPhysics:
         power_percent = max(0.0, min(100.0, power_percent))
         self.current_kw = (power_percent / 100.0) * self.max_power
         
-        # Thermodynamics: 1 kW = ~50 kJ/s heat in (efficiency 0.9)
         heat_in = self.current_kw * 50.0 * 0.9 
         
         kwh = self.current_kw * (dt / 3600.0)
@@ -85,7 +72,6 @@ class BoilerPhysics:
         total_heat_out = 0.0
         
         for u in self.units.values():
-            # State Machine
             if u['state'] == 'HEATING':
                 if u['current'] >= u['target'] - 0.5: u['state'] = 'HOLDING'
             elif u['state'] == 'HOLDING':
@@ -93,7 +79,6 @@ class BoilerPhysics:
                     u['duration_left'] = max(0, u['duration_left'] - dt)
                 if u['duration_left'] <= 0: u['state'] = 'FINISHED'
             
-            # Valve & Temperature Physics
             u['valve_open'] = False
             if u['state'] in ['HEATING', 'HOLDING']:
                 if u['current'] < u['target'] - 0.5 and self.boiler_temp > u['current']:

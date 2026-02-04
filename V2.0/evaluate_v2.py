@@ -1,29 +1,18 @@
-"""
-V2.2 Showdown: Student vs Teacher vs Rules
-hypothesis: V2.2 (Unconditional Student) > V1.0 (Teacher) > SmartController
-"""
-
 import torch
 import torch.nn as nn
 import os
 import sys
 import numpy as np
 
-# Ensure imports work
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
 from boiler_env import BoilerPhysics
 from benchmark import BENCHMARK_SCENARIOS
 
-# Device Configuration
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ==========================================
-# Model Architectures
-# ==========================================
 class RCPolicy(nn.Module):
-    """V1.0 Architecture (Cost Conditioned)"""
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
@@ -41,11 +30,10 @@ class RCPolicy(nn.Module):
         return self.net(x)
 
 class UnconditionalPolicy(nn.Module):
-    """V2.4 Architecture: Time-Aware State -> Action"""
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(6, 1024), nn.ReLU(),  # 6D state: +min_remaining_time
+            nn.Linear(6, 1024), nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(1024, 1024), nn.ReLU(),
             nn.Dropout(0.1),
@@ -56,9 +44,6 @@ class UnconditionalPolicy(nn.Module):
     def forward(self, state):
         return self.net(state)
 
-# ==========================================
-# Controllers
-# ==========================================
 class SmartControllerRules:
     def decide(self, temp, units):
         active = [u for u in units.values() if u['state'] != 'FINISHED']
@@ -81,7 +66,6 @@ class SmartControllerRules:
         else: return 0.0
 
 def load_model_v1(path):
-    """Load V1.0 (RCPolicy)"""
     if not os.path.exists(path):
         print(f"Warning: Model not found at {path}")
         return None
@@ -95,7 +79,6 @@ def load_model_v1(path):
         return None
 
 def load_model_v2(path):
-    """Load V2.2 (UnconditionalPolicy)"""
     if not os.path.exists(path):
         print(f"Warning: Model not found at {path}")
         return None
@@ -108,9 +91,6 @@ def load_model_v2(path):
         print(f"Error loading {path}: {e}")
         return None
 
-# ==========================================
-# Simulation
-# ==========================================
 def run_simulation(controller_type, model=None, scenario=None):
     physics = BoilerPhysics()
     physics.reset()
@@ -131,7 +111,7 @@ def run_simulation(controller_type, model=None, scenario=None):
         power = 0.0
         if controller_type == "SC":
             power = sc.decide(physics.boiler_temp, physics.units)
-        elif controller_type == "V1.0": # RCP with cost conditioning
+        elif controller_type == "V1.0":
             obs = torch.tensor([[
                 physics.boiler_temp / 300.0,
                 max_t / 300.0,
@@ -141,7 +121,7 @@ def run_simulation(controller_type, model=None, scenario=None):
             target = torch.tensor([[5.0]], dtype=torch.float32).to(device)
             with torch.no_grad():
                 power = model(obs, target).item() * 100.0
-        else: # V2.4 Time-Aware Unconditional
+        else:
             obs = torch.tensor([[
                 physics.boiler_temp / 300.0,
                 max_t / 300.0,
@@ -157,15 +137,11 @@ def run_simulation(controller_type, model=None, scenario=None):
         
     return physics.total_cost
 
-# ==========================================
-# Main Evaluation
-# ==========================================
 def evaluate_all():
     print("="*80)
     print("V2.4 FINAL SHOWDOWN: Time-Aware Student vs Teacher vs Adaptive SC")
     print("="*80)
     
-    # Load Models
     teacher_path = os.path.join(current_dir, "..", "V1.0", "model.pth")
     student_path = os.path.join(current_dir, "model_v2.pth")
     
@@ -187,12 +163,10 @@ def evaluate_all():
         c_v1 = run_simulation("V1.0", model=teacher, scenario=scenario) if teacher else 999
         c_v2 = run_simulation("V2.0", model=student, scenario=scenario)
         
-        # Determine Winner (Lowest Cost)
         results = [("SC", c_sc), ("V1.0", c_v1), ("V2.0", c_v2)]
         results.sort(key=lambda x: x[1])
         winner = results[0][0]
         
-        # Update Stats
         scores["SC"] += c_sc
         scores["V1.0"] += c_v1
         scores["V2.0"] += c_v2
@@ -205,13 +179,12 @@ def evaluate_all():
     print(f"TOTAL WINS           | {wins['SC']:>10} | {wins['V1.0']:>15} | {wins['V2.0']:>15}")
     print("="*80)
 
-    # Validation Logic
     if scores['V2.0'] < scores['V1.0'] and scores['V2.0'] < scores['SC']:
-        print("✅ SUCCESS: V2.0 (Student) is the new State-of-the-Art!")
+        print("SUCCESS: V2.0 (Student) is the new State-of-the-Art!")
     elif scores['V2.0'] < scores['SC']:
-        print("⚠️ PARTIAL: V2.0 beat Rules but failed to beat Teacher.")
+        print("PARTIAL: V2.0 beat Rules but failed to beat Teacher.")
     else:
-        print("❌ FAILURE: V2.0 failed to improve.")
+        print("FAILURE: V2.0 failed to improve.")
 
 if __name__ == "__main__":
     evaluate_all()

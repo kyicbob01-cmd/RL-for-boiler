@@ -1,8 +1,3 @@
-"""
-Stage 2: PPO Fine-tuning
-Refine BC-pretrained policy via Reinforcement Learning to surpass Time-Aware SC
-"""
-
 import os
 import sys
 import numpy as np
@@ -10,22 +5,59 @@ import torch
 import torch.nn as nn
 from collections import deque
 
-# Setup paths
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 
 from boiler_env import BoilerPhysics
 from benchmark import BENCHMARK_SCENARIOS
 from time_aware_sc import TimeAwareSC
-from policy import Policy
 
-# Device
+class Policy(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(6, 512), nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 512), nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 256), nn.ReLU(),
+            nn.Linear(256, 1), nn.Sigmoid()
+        )
+        self.value_head = nn.Sequential(
+            nn.Linear(6, 256), nn.ReLU(),
+            nn.Linear(256, 1)
+        )
+        self.log_std = nn.Parameter(torch.zeros(1))
+    
+    def forward(self, state):
+        return self.net(state)
+    
+    def get_action(self, state, deterministic=False):
+        mean = self.forward(state)
+        if deterministic:
+            return mean, torch.zeros(1)
+        std = torch.exp(self.log_std).clamp(0.01, 0.5)
+        dist = torch.distributions.Normal(mean, std)
+        action = dist.sample()
+        action = torch.clamp(action, 0, 1)
+        log_prob = dist.log_prob(action).sum(-1)
+        return action, log_prob
+    
+    def get_value(self, state):
+        return self.value_head(state)
+    
+    def evaluate(self, state, action):
+        mean = self.forward(state)
+        std = torch.exp(self.log_std).clamp(0.01, 0.5)
+        dist = torch.distributions.Normal(mean, std)
+        log_prob = dist.log_prob(action).sum(-1)
+        entropy = dist.entropy().sum(-1)
+        value = self.value_head(state).squeeze(-1)
+        return log_prob, entropy, value
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"[Stage 2] Device: {device}")
 
-# ==========================================
-# PPO Hyperparameters
-# ==========================================
 class PPOConfig:
     lr = 3e-4
     gamma = 0.99
@@ -35,12 +67,9 @@ class PPOConfig:
     value_coef = 0.5
     max_grad_norm = 0.5
     ppo_epochs = 10
-    batch_size = 32768     # Maximized for GPU (was 16384)
-    rollout_steps = 65536  # Larger rollout (was 32768)
+    batch_size = 32768
+    rollout_steps = 65536
 
-# ==========================================
-# Rollout Buffer (Optimized for GPU)
-# ==========================================
 class RolloutBuffer:
     def __init__(self, max_size=100000):
         self.max_size = max_size
@@ -66,7 +95,6 @@ class RolloutBuffer:
         self.ptr = 0
     
     def get(self):
-        # Transfer all data to GPU at once
         n = self.ptr
         return (
             torch.tensor(self.states[:n], dtype=torch.float32, device=device),
@@ -77,9 +105,6 @@ class RolloutBuffer:
             torch.tensor(self.dones[:n], dtype=torch.float32, device=device)
         )
 
-# ==========================================
-# Compute GAE
-# ==========================================
 def compute_gae(rewards, values, dones, gamma, gae_lambda):
     advantages = []
     gae = 0
@@ -99,11 +124,7 @@ def compute_gae(rewards, values, dones, gamma, gae_lambda):
     
     return advantages, returns
 
-# ==========================================
-# Evaluate Policy
-# ==========================================
 def evaluate_policy(model):
-    """Evaluate policy on all benchmark scenarios, compare with SC"""
     model.eval()
     sc = TimeAwareSC()
     
@@ -112,7 +133,6 @@ def evaluate_policy(model):
     total_sc = 0
     
     for scenario in BENCHMARK_SCENARIOS:
-        # Run SC
         physics = BoilerPhysics()
         physics.reset()
         for task in scenario["tasks"]:
@@ -126,7 +146,6 @@ def evaluate_policy(model):
         sc_cost = physics.total_cost
         total_sc += sc_cost
         
-        # Run DRL
         physics = BoilerPhysics()
         physics.reset()
         for task in scenario["tasks"]:
@@ -164,18 +183,13 @@ def evaluate_policy(model):
     model.train()
     return victories, total_drl, total_sc
 
-# ==========================================
-# Collect Rollout
-# ==========================================
 def collect_rollout(model, buffer, config):
-    """Collect experience for PPO update"""
     import random
     
     steps = 0
     episode_rewards = []
     
     while steps < config.rollout_steps:
-        # Random scenario
         scenario = random.choice(BENCHMARK_SCENARIOS)
         
         physics = BoilerPhysics()
@@ -186,12 +200,11 @@ def collect_rollout(model, buffer, config):
         prev_temp = physics.boiler_temp
         prev_cost = 0
         ep_reward = 0
-        prev_load = physics.get_system_state()[2]  # Track thermal load progress
+        prev_load = physics.get_system_state()[2]
         
         for step in range(2000):
             max_t, active, load, min_time = physics.get_system_state()
             if active == 0:
-                # Task completed successfully - bonus reward
                 ep_reward += 10.0
                 buffer.add(state, action_np, 10.0, value.cpu().item(), log_prob.cpu().item(), 1.0)
                 break
@@ -219,22 +232,17 @@ def collect_rollout(model, buffer, config):
             
             physics.step(power, dt=0.5)
             
-            # === REDESIGNED REWARD FUNCTION ===
-            # 1. Cost penalty (minimize energy)
             cost_delta = physics.total_cost - prev_cost
-            cost_reward = -cost_delta * 0.1  # Scaled down
+            cost_reward = -cost_delta * 0.1
             prev_cost = physics.total_cost
             
-            # 2. Progress reward (encourage heating toward target)
             curr_load = physics.get_system_state()[2]
-            progress = (prev_load - curr_load) / 10000.0  # Positive when load decreases
+            progress = (prev_load - curr_load) / 10000.0
             prev_load = curr_load
             
-            # 3. Temperature proximity reward (encourage staying near target)
             temp_gap = abs(physics.boiler_temp - max_t)
-            temp_reward = -temp_gap / 100.0 if temp_gap > 5 else 0.1  # Bonus for being close
+            temp_reward = -temp_gap / 100.0 if temp_gap > 5 else 0.1
             
-            # Combined reward
             reward = cost_reward + progress + temp_reward
             
             done = False
@@ -254,22 +262,16 @@ def collect_rollout(model, buffer, config):
             if steps >= config.rollout_steps:
                 break
         else:
-            # Episode ended without completing all tasks - penalty
             if active > 0:
-                penalty = -5.0 * active  # Penalty per incomplete unit
+                penalty = -5.0 * active
                 ep_reward += penalty
         
         episode_rewards.append(ep_reward)
     return np.mean(episode_rewards) if episode_rewards else 0
 
-# ==========================================
-# PPO Update
-# ==========================================
 def ppo_update(model, optimizer, buffer, config):
-    """Perform PPO update"""
     states, actions, rewards, values, old_log_probs, dones = buffer.get()
     
-    # Compute advantages
     advantages, returns = compute_gae(
         rewards.cpu().numpy(), 
         values, 
@@ -278,10 +280,8 @@ def ppo_update(model, optimizer, buffer, config):
         config.gae_lambda
     )
     
-    # Normalize advantages
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
     
-    # PPO epochs
     dataset_size = len(states)
     indices = np.arange(dataset_size)
     
@@ -298,24 +298,19 @@ def ppo_update(model, optimizer, buffer, config):
             batch_advantages = advantages[batch_idx]
             batch_returns = returns[batch_idx]
             
-            # Evaluate current policy
             log_probs, entropy, values_pred = model.evaluate(
                 batch_states, 
                 batch_actions.unsqueeze(-1)
             )
             
-            # PPO Clip Loss
             ratio = torch.exp(log_probs - batch_old_log_probs)
             clip_ratio = torch.clamp(ratio, 1 - config.clip_ratio, 1 + config.clip_ratio)
             policy_loss = -torch.min(ratio * batch_advantages, clip_ratio * batch_advantages).mean()
             
-            # Value Loss
             value_loss = nn.MSELoss()(values_pred, batch_returns)
             
-            # Entropy Bonus
             entropy_loss = -entropy.mean()
             
-            # Total Loss
             loss = (
                 policy_loss + 
                 config.value_coef * value_loss + 
@@ -331,22 +326,17 @@ def ppo_update(model, optimizer, buffer, config):
     
     return policy_loss.item(), value_loss.item()
 
-# ==========================================
-# Main Training Loop
-# ==========================================
 def train_ppo(max_updates=1000, eval_interval=10, target_victories=10):
-    """Train policy via PPO to surpass Time-Aware SC"""
     print("[Stage 2] Loading BC-pretrained model...")
     
-    # GPU Optimization
     torch.set_float32_matmul_precision('high')
     
-    # Load BC model
     model = Policy().to(device)
     bc_path = os.path.join(current_dir, "model_bc.pth")
     
     if os.path.exists(bc_path):
-        model.load_state_dict(torch.load(bc_path, map_location=device))
+        state_dict = torch.load(bc_path, map_location=device)
+        model.net.load_state_dict(state_dict)
         print(f"[Stage 2] Loaded: {bc_path}")
     else:
         print("[Stage 2] WARNING: BC model not found, starting from scratch!")
@@ -364,13 +354,10 @@ def train_ppo(max_updates=1000, eval_interval=10, target_victories=10):
     print("-" * 60)
     
     for update in range(max_updates):
-        # Collect rollout
         avg_reward = collect_rollout(model, buffer, config)
         
-        # PPO update
         policy_loss, value_loss = ppo_update(model, optimizer, buffer, config)
         
-        # Evaluate periodically
         if (update + 1) % eval_interval == 0:
             victories, drl_total, sc_total = evaluate_policy(model)
             
@@ -379,18 +366,16 @@ def train_ppo(max_updates=1000, eval_interval=10, target_victories=10):
                   f"DRL={drl_total:.2f}, SC={sc_total:.2f}, "
                   f"Policy Loss={policy_loss:.4f}")
             
-            # Checkpoint strategy
-            if victories >= 6:  # 60% threshold
+            if victories >= 6:
                 if victories > best_victories:
                     best_victories = victories
                     best_path = os.path.join(current_dir, "model_best.pth")
                     torch.save(model.state_dict(), best_path)
                     print(f"    [Checkpoint] Saved best model ({victories} victories)")
             
-            # Check for victory
             if victories >= target_victories:
                 consecutive_max += 1
-                if consecutive_max >= 3:  # Require 3 consecutive max evaluations
+                if consecutive_max >= 3:
                     print(f"\n[Stage 2] SUCCESS! Achieved {victories}/10 victories (3x consecutive)")
                     final_path = os.path.join(current_dir, "model_final.pth")
                     torch.save(model.state_dict(), final_path)
@@ -402,20 +387,14 @@ def train_ppo(max_updates=1000, eval_interval=10, target_victories=10):
     print(f"\n[Stage 2] Training completed. Best: {best_victories}/10 victories")
     return model
 
-# ==========================================
-# Main
-# ==========================================
 if __name__ == "__main__":
-    # Check if BC model exists
     bc_path = os.path.join(current_dir, "model_bc.pth")
     if not os.path.exists(bc_path):
         print("[Stage 2] ERROR: Run stage1_bc.py first to create model_bc.pth")
         sys.exit(1)
     
-    # Train PPO
     model = train_ppo(max_updates=500, eval_interval=5, target_victories=10)
     
-    # Final evaluation
     print("\n" + "=" * 60)
     print("[Stage 2] Final Evaluation")
     print("=" * 60)

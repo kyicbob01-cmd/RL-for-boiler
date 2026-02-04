@@ -1,14 +1,8 @@
-"""
-V3.0 ES Model Validation (Fixed)
-Verify that the ES model completes all tasks correctly
-"""
-
 import os
 import sys
 import torch
 import torch.nn as nn
 
-# Setup paths
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 
@@ -16,9 +10,6 @@ from boiler_env import BoilerPhysics
 from benchmark import BENCHMARK_SCENARIOS
 from time_aware_sc import TimeAwareSC
 
-# ==========================================
-# Policy Network (must match train_es.py)
-# ==========================================
 class Policy(nn.Module):
     def __init__(self):
         super().__init__()
@@ -34,11 +25,7 @@ class Policy(nn.Module):
     def forward(self, state):
         return self.net(state)
 
-# ==========================================
-# Validation Function (matches training evaluation)
-# ==========================================
 def validate_scenario(model, scenario):
-    """Run scenario - using same logic as training"""
     physics = BoilerPhysics()
     physics.reset()
     
@@ -58,7 +45,6 @@ def validate_scenario(model, scenario):
             rate = physics.boiler_temp - prev_temp
             prev_temp = physics.boiler_temp
             
-            # CPU-only, same as training!
             state = torch.tensor([[
                 physics.boiler_temp / 300.0,
                 max_t / 300.0,
@@ -76,7 +62,6 @@ def validate_scenario(model, scenario):
             
             physics.step(power, dt=0.5)
     
-    # Build unit status
     unit_status = {}
     for uid, unit in physics.units.items():
         unit_status[unit['name']] = {
@@ -94,11 +79,7 @@ def validate_scenario(model, scenario):
         'max_temp': max(temp_history) if temp_history else 0
     }
 
-# ==========================================
-# Main
-# ==========================================
 if __name__ == "__main__":
-    # Model priority: final > best
     es_final = os.path.join(current_dir, "model_es_final.pth")
     es_best = os.path.join(current_dir, "model_es_best.pth")
     
@@ -114,13 +95,11 @@ if __name__ == "__main__":
     print("V3.0 ES MODEL VALIDATION")
     print("="*80)
     
-    # Load model on CPU (same as training)
     model = Policy()
     model.load_state_dict(torch.load(model_path, map_location='cpu'))
     model.eval()
     print(f"Loaded: {model_path}")
     
-    # Run SC for comparison
     sc = TimeAwareSC()
     
     total_es = 0
@@ -131,10 +110,8 @@ if __name__ == "__main__":
     print("-"*70)
     
     for scenario in BENCHMARK_SCENARIOS:
-        # ES evaluation
         es_result = validate_scenario(model, scenario)
         
-        # SC evaluation
         physics = BoilerPhysics()
         physics.reset()
         for task in scenario["tasks"]:
@@ -149,7 +126,6 @@ if __name__ == "__main__":
         total_es += es_result['cost']
         total_sc += sc_cost
         
-        # Check all units completed
         all_completed = all(u['completed'] for u in es_result['units'].values())
         status = "PASS" if all_completed else "FAIL"
         if not all_completed:

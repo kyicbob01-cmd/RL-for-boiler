@@ -1,12 +1,3 @@
-"""
-Return-Conditioned Policy V2.3 (Direct CPU Cloning)
-Teacher: V1.0 Model (RCP)
-Student: V2.3 Model (Unconditional - State Only)
-
-Key Fix: Use original BoilerPhysics (CPU) for data collection to ensure
-physics match between training and evaluation.
-"""
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -14,22 +5,16 @@ import torch.optim as optim
 import os
 import sys
 
-# Ensure imports work
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
 from boiler_env import BoilerPhysics
 from benchmark import BENCHMARK_SCENARIOS
 
-# Device Configuration
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# ==========================================
-# 0. Model Architectures
-# ==========================================
 class RCPolicy(nn.Module):
-    """V1.0 Architecture (for loading Teacher)"""
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
@@ -47,11 +32,10 @@ class RCPolicy(nn.Module):
         return self.net(x)
 
 class UnconditionalPolicy(nn.Module):
-    """V2.4 Architecture: Time-Aware State -> Action"""
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(6, 1024), nn.ReLU(),  # 6D state: +min_remaining_time
+            nn.Linear(6, 1024), nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(1024, 1024), nn.ReLU(),
             nn.Dropout(0.1),
@@ -62,9 +46,6 @@ class UnconditionalPolicy(nn.Module):
     def forward(self, state):
         return self.net(state)
 
-# ==========================================
-# 1. Teacher Agent (V1.0)
-# ==========================================
 class RCPTeacher:
     def __init__(self):
         self.model = RCPolicy().to(device)
@@ -77,8 +58,7 @@ class RCPTeacher:
             raise FileNotFoundError(f"Teacher model not found at {v1_path}")
 
     def decide(self, physics):
-        """Deterministic Teacher Decision (No Noise)"""
-        max_t, active, load, _ = physics.get_system_state()  # Ignore min_time for teacher
+        max_t, active, load, _ = physics.get_system_state()
         
         obs = torch.tensor([[
             physics.boiler_temp / 300.0,
@@ -95,24 +75,17 @@ class RCPTeacher:
             
         return action * 100.0
 
-# ==========================================
-# 2. Data Collection (CPU-Based)
-# ==========================================
 def collect_data(num_episodes=5000):
     print(f"Collecting Data (CPU Physics, {num_episodes} episodes)...")
     teacher = RCPTeacher()
     all_data = []
     
-    # Use BENCHMARK_SCENARIOS + random variations
     scenarios = BENCHMARK_SCENARIOS * (num_episodes // len(BENCHMARK_SCENARIOS) + 1)
     
     for ep in range(num_episodes):
-        # Scenario Selection
         if ep < len(BENCHMARK_SCENARIOS) * 10:
-            # First 100 episodes: Use benchmark scenarios
             scenario = scenarios[ep % len(BENCHMARK_SCENARIOS)]
         else:
-            # Rest: Random scenario for diversity
             import random
             scenario = {"name": f"Rand_{ep}", "tasks": []}
             for _ in range(random.randint(1, 4)):
@@ -123,7 +96,6 @@ def collect_data(num_episodes=5000):
                     "weight": random.uniform(100, 2000)
                 })
 
-        # Run simulation with ORIGINAL CPU Physics
         physics = BoilerPhysics()
         physics.reset()
         for task in scenario["tasks"]:
@@ -146,10 +118,9 @@ def collect_data(num_episodes=5000):
                 active / 4.0,
                 rate,
                 load / 2000000.0,
-                min_time / 500.0  # Normalize: 500s max holding duration
+                min_time / 500.0
             ], dtype=np.float32)
             
-            # Teacher Decision (Deterministic)
             power = teacher.decide(physics)
             
             trajectory.append({
@@ -159,7 +130,6 @@ def collect_data(num_episodes=5000):
             
             physics.step(power, dt=0.5)
         
-        # Only keep completed episodes
         if physics.get_system_state()[1] == 0:
             all_data.extend(trajectory)
         
@@ -169,9 +139,6 @@ def collect_data(num_episodes=5000):
     print(f"Data Collection Complete: {len(all_data)} samples")
     return all_data
 
-# ==========================================
-# 3. Training Loop (GPU)
-# ==========================================
 def train(data, epochs=500):
     print(f"\nTraining Student V2.3 (Unconditional, {epochs} Epochs)...")
     
@@ -210,9 +177,6 @@ def train(data, epochs=500):
     print(f"Student V2.3 Saved: {model_save_path}")
     return student.to(device)
 
-# ==========================================
-# 4. Validation
-# ==========================================
 def validate(model):
     print("\nValidating Student V2.4 (Time-Aware)...")
     model.eval()
@@ -242,11 +206,6 @@ def validate(model):
         print(f"  {scenario['name']}: {physics.total_cost:.2f}")
 
 if __name__ == "__main__":
-    # 1. Collect Data (CPU Physics)
     data = collect_data(5000)
-    
-    # 2. Train Student (GPU)
     student = train(data, epochs=500)
-    
-    # 3. Quick Check
     validate(student)

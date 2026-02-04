@@ -1,14 +1,4 @@
-"""
-Time-Aware SmartController
-The Expert Controller for Behavior Cloning
-"""
-
 class TimeAwareSC:
-    """
-    Adaptive heating margins by temperature zone + Time-aware finishing
-    Total Cost on Benchmark: 159.47 (8.7% improvement over original SC)
-    """
-    
     def decide(self, temp, units):
         active = [u for u in units.values() if u['state'] != 'FINISHED']
         if not active: return 0.0
@@ -16,7 +6,6 @@ class TimeAwareSC:
         heating = [u for u in active if u['state'] == 'HEATING']
         holding = [u for u in active if u['state'] == 'HOLDING']
         
-        # Get max target and select margins
         all_targets = [u['target'] for u in active]
         max_target = max(all_targets)
         
@@ -27,33 +16,27 @@ class TimeAwareSC:
         else:
             heat_margin, hold_margin = 40, 2
         
-        # Phase 1: HEATING (Bang-Bang)
         if heating:
             heat_target = max([u['target'] for u in heating])
             target_boiler = heat_target + heat_margin
             
             if temp < target_boiler:
-                return 100.0  # Full power
+                return 100.0
             else:
-                return 0.0    # Coast
+                return 0.0
         
-        # Phase 2: HOLDING (Time-Aware)
         if holding:
             hold_target = max([u['target'] for u in holding])
             min_remaining = min([u['duration_left'] for u in holding])
             
-            # TIME-AWARE FINISHING LOGIC
             if min_remaining <= 15:
-                # Last 15 seconds: stop heating, coast to finish
                 return 0.0
             elif min_remaining <= 30:
-                # Last 30 seconds: minimal power
-                target_boiler = hold_target  # Exact target, no margin
+                target_boiler = hold_target
                 gap = target_boiler - temp
                 if gap > 1: return 15.0
                 else: return 0.0
             else:
-                # Normal holding
                 target_boiler = hold_target + hold_margin
                 gap = target_boiler - temp
                 

@@ -1,13 +1,7 @@
-"""
-V3.0 RCP Final Evaluation
-Compare Time-Aware SC vs RCP (with aggressive target cost)
-"""
-
 import os
 import sys
 import torch
 
-# Setup paths
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 
@@ -18,11 +12,7 @@ from policy import RCPolicy
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ==========================================
-# Run Scenarios
-# ==========================================
 def run_sc(scenario):
-    """Run Time-Aware SC on scenario"""
     sc = TimeAwareSC()
     physics = BoilerPhysics()
     physics.reset()
@@ -40,8 +30,6 @@ def run_sc(scenario):
     return physics.total_cost
 
 def run_rcp(scenario, model, target_multiplier=0.9):
-    """Run RCP with target = SC_cost * multiplier"""
-    # First run SC to get baseline
     sc_cost = run_sc(scenario)
     target_cost = sc_cost * target_multiplier
     
@@ -78,15 +66,11 @@ def run_rcp(scenario, model, target_multiplier=0.9):
     
     return physics.total_cost, sc_cost, target_cost
 
-# ==========================================
-# Multi-Target Evaluation
-# ==========================================
 def evaluate_with_targets():
     print("=" * 90)
     print("V3.0 RCP EVALUATION: Testing Multiple Target Cost Multipliers")
     print("=" * 90)
     
-    # Load RCP model
     model = RCPolicy().to(device)
     rcp_path = os.path.join(current_dir, "model_rcp.pth")
     
@@ -98,7 +82,6 @@ def evaluate_with_targets():
     model.eval()
     print(f"Loaded: {rcp_path}\n")
     
-    # Test different target multipliers
     multipliers = [1.0, 0.95, 0.9, 0.85, 0.8]
     
     for mult in multipliers:
@@ -130,15 +113,11 @@ def evaluate_with_targets():
         print(f"{'TOTAL':<20} | {total_sc:>10.2f} | {total_rcp:>10.2f} |            | {improvement:>+7.1f}%")
         print(f"{'VICTORIES':<20} |            | {victories:>10}/10 |            |")
 
-# ==========================================
-# Standard Evaluation (0.9 multiplier)
-# ==========================================
 def evaluate_standard():
     print("=" * 80)
     print("V3.0 RCP FINAL EVALUATION: Time-Aware SC vs RCP (target = 0.9x)")
     print("=" * 80)
     
-    # Load RCP model
     model = RCPolicy().to(device)
     rcp_path = os.path.join(current_dir, "model_rcp.pth")
     

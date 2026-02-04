@@ -1,11 +1,7 @@
-"""
-Benchmark Scenarios and Evaluation Logic
-"""
 import numpy as np
 from boiler_env import BoilerPhysics
 import os
 
-# 10 Standard Scenarios
 BENCHMARK_SCENARIOS = [
     {"name": "S1_Low", "tasks": [{"name": "A", "target": 80.0, "duration": 120.0, "weight": 500.0}]},
     {"name": "S2_High", "tasks": [{"name": "A", "target": 180.0, "duration": 200.0, "weight": 800.0}]},
@@ -28,16 +24,11 @@ def run_single_episode(model, scenario, max_steps=2000, dt=0.5):
         physics.add_unit(task["name"], task["target"], task["duration"], task["weight"])
         expected_time = max(expected_time, task["duration"])
     
-    # Heat up time estimate
     max_target = max(t["target"] for t in scenario["tasks"])
     expected_time += (max_target - 25.0) / 0.5
     
     total_time = 0.0
     done = False
-    
-    # Needs a model with .predict interface (PPO/SB3 style) or similar wrapper
-    # This function assumes SB3 interface. If used with RCP, adapter needed.
-    # Leaving logic generic.
     pass
 
 def _get_obs(physics):

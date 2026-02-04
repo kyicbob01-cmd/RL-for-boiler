@@ -1,8 +1,3 @@
-"""
-Stage 1: Behavior Cloning from Time-Aware SC
-Train DRL to mimic the expert controller as warm start for Stage 2
-"""
-
 import os
 import sys
 import numpy as np
@@ -10,33 +5,39 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-# Setup paths
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 
 from boiler_env import BoilerPhysics
 from benchmark import BENCHMARK_SCENARIOS
 from time_aware_sc import TimeAwareSC
-from policy import Policy
 
-# Device
+class Policy(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(6, 512), nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 512), nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 256), nn.ReLU(),
+            nn.Linear(256, 1), nn.Sigmoid()
+        )
+    
+    def forward(self, state):
+        return self.net(state)
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"[Stage 1] Device: {device}")
 
-# ==========================================
-# Data Collection
-# ==========================================
 def collect_expert_data(num_episodes=5000):
-    """Collect (state, action) pairs from Time-Aware SC"""
     print(f"[Stage 1] Collecting Expert Data ({num_episodes} episodes)...")
     
     sc = TimeAwareSC()
     all_states = []
     all_actions = []
     
-    # Mix of benchmark and random scenarios
     for ep in range(num_episodes):
-        # Scenario selection
         if ep < len(BENCHMARK_SCENARIOS) * 20:
             scenario = BENCHMARK_SCENARIOS[ep % len(BENCHMARK_SCENARIOS)]
         else:
@@ -50,7 +51,6 @@ def collect_expert_data(num_episodes=5000):
                     "weight": random.uniform(100, 2000)
                 })
         
-        # Run simulation
         physics = BoilerPhysics()
         physics.reset()
         for task in scenario["tasks"]:
@@ -66,7 +66,6 @@ def collect_expert_data(num_episodes=5000):
             rate = physics.boiler_temp - prev_temp
             prev_temp = physics.boiler_temp
             
-            # 6D State
             state = np.array([
                 physics.boiler_temp / 300.0,
                 max_t / 300.0,
@@ -76,9 +75,8 @@ def collect_expert_data(num_episodes=5000):
                 min_time / 500.0
             ], dtype=np.float32)
             
-            # Expert action
             power = sc.decide(physics.boiler_temp, physics.units)
-            action = power / 100.0  # Normalize to 0-1
+            action = power / 100.0
             
             all_states.append(state)
             all_actions.append(action)
@@ -94,22 +92,13 @@ def collect_expert_data(num_episodes=5000):
     print(f"[Stage 1] Data Collection Complete: {len(states)} samples")
     return states, actions
 
-# ==========================================
-# Training
-# ==========================================
 def train_bc(states, actions, epochs=300, batch_size=32768, lr=1e-3):
-    """Train policy via Behavior Cloning (Supervised Learning)
-    Optimized for maximum GPU utilization.
-    """
     print(f"\n[Stage 1] Training Behavior Cloning ({epochs} epochs, batch={batch_size})...")
     
-    # Prepare data - keep on CPU initially, transfer in batches
     X = torch.tensor(states, dtype=torch.float32)
     Y = torch.tensor(actions, dtype=torch.float32)
     dataset = TensorDataset(X, Y)
     
-    # Optimized DataLoader: pin_memory for faster GPU transfer
-    # Note: num_workers=0 for Windows compatibility (avoids deadlock)
     loader = DataLoader(
         dataset, 
         batch_size=batch_size, 
@@ -117,12 +106,10 @@ def train_bc(states, actions, epochs=300, batch_size=32768, lr=1e-3):
         pin_memory=True
     )
     
-    # Model
     model = Policy().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
     
-    # Training loop
     for epoch in range(epochs):
         total_loss = 0
         for batch_x, batch_y in loader:
@@ -143,18 +130,13 @@ def train_bc(states, actions, epochs=300, batch_size=32768, lr=1e-3):
         if (epoch + 1) % 50 == 0:
             print(f"  Epoch {epoch+1}: Loss = {avg_loss:.6f}")
     
-    # Save model
     model_path = os.path.join(current_dir, "model_bc.pth")
     torch.save(model.state_dict(), model_path)
     print(f"[Stage 1] Model saved: {model_path}")
     
     return model
 
-# ==========================================
-# Validation
-# ==========================================
 def validate(model):
-    """Compare BC model vs SC on benchmark scenarios"""
     print(f"\n[Stage 1] Validation...")
     model.eval()
     sc = TimeAwareSC()
@@ -162,7 +144,6 @@ def validate(model):
     results = []
     
     for scenario in BENCHMARK_SCENARIOS:
-        # Run SC
         physics = BoilerPhysics()
         physics.reset()
         for task in scenario["tasks"]:
@@ -176,7 +157,6 @@ def validate(model):
         
         sc_cost = physics.total_cost
         
-        # Run BC Model
         physics = BoilerPhysics()
         physics.reset()
         for task in scenario["tasks"]:
@@ -220,7 +200,6 @@ def validate(model):
         
         print(f"  {scenario['name']:<20}: SC={sc_cost:.2f}, BC={bc_cost:.2f}, Diff={diff_pct:.1f}% [{match}]")
     
-    # Summary
     ok_count = sum(1 for r in results if r['match'] == 'OK')
     print(f"\n[Stage 1] Validation Complete: {ok_count}/10 scenarios within 5%")
     
@@ -231,15 +210,7 @@ def validate(model):
         print("[Stage 1] WARNING: BC model may need more training")
         return False
 
-# ==========================================
-# Main
-# ==========================================
 if __name__ == "__main__":
-    # 1. Collect Expert Data
     states, actions = collect_expert_data(5000)
-    
-    # 2. Train BC
     model = train_bc(states, actions, epochs=300)
-    
-    # 3. Validate
     validate(model)

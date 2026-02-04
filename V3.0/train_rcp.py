@@ -1,8 +1,3 @@
-"""
-V3.0 RCP Training
-Train Return-Conditioned Policy using Time-Aware SC trajectories
-"""
-
 import os
 import sys
 import numpy as np
@@ -10,7 +5,6 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-# Setup paths
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 
@@ -19,27 +13,20 @@ from benchmark import BENCHMARK_SCENARIOS
 from time_aware_sc import TimeAwareSC
 from policy import RCPolicy
 
-# Device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"[RCP Training] Device: {device}")
 
-# GPU Optimization
 torch.set_float32_matmul_precision('high')
 
-# ==========================================
-# Data Collection with Episode Costs
-# ==========================================
 def collect_rcp_data(num_episodes=10000):
-    """Collect (state, action, episode_cost) triplets from Time-Aware SC"""
     print(f"[RCP] Collecting Data ({num_episodes} episodes)...")
     
     sc = TimeAwareSC()
     all_states = []
     all_actions = []
-    all_costs = []  # Cost for each sample (episode total cost)
+    all_costs = []
     
     for ep in range(num_episodes):
-        # Scenario selection (mix of benchmark and random)
         if ep < len(BENCHMARK_SCENARIOS) * 50:
             scenario = BENCHMARK_SCENARIOS[ep % len(BENCHMARK_SCENARIOS)]
         else:
@@ -53,7 +40,6 @@ def collect_rcp_data(num_episodes=10000):
                     "weight": random.uniform(100, 2000)
                 })
         
-        # Run simulation and collect trajectory
         physics = BoilerPhysics()
         physics.reset()
         for task in scenario["tasks"]:
@@ -70,7 +56,6 @@ def collect_rcp_data(num_episodes=10000):
             rate = physics.boiler_temp - prev_temp
             prev_temp = physics.boiler_temp
             
-            # 6D State
             state = np.array([
                 physics.boiler_temp / 300.0,
                 max_t / 300.0,
@@ -80,17 +65,14 @@ def collect_rcp_data(num_episodes=10000):
                 min_time / 500.0
             ], dtype=np.float32)
             
-            # Expert action
             power = sc.decide(physics.boiler_temp, physics.units)
             action = power / 100.0
             
             trajectory.append((state, action))
             physics.step(power, dt=0.5)
         
-        # Get episode total cost
         episode_cost = physics.total_cost
         
-        # Add all samples with their episode cost
         for state, action in trajectory:
             all_states.append(state)
             all_actions.append(action)
@@ -108,14 +90,9 @@ def collect_rcp_data(num_episodes=10000):
     
     return states, actions, costs
 
-# ==========================================
-# Training
-# ==========================================
 def train_rcp(states, actions, costs, epochs=500, batch_size=32768, lr=1e-3):
-    """Train RCP via Behavior Cloning with cost conditioning"""
     print(f"\n[RCP] Training ({epochs} epochs, batch={batch_size})...")
     
-    # Prepare data
     X_state = torch.tensor(states, dtype=torch.float32)
     X_cost = torch.tensor(costs, dtype=torch.float32)
     Y = torch.tensor(actions, dtype=torch.float32)
@@ -123,7 +100,6 @@ def train_rcp(states, actions, costs, epochs=500, batch_size=32768, lr=1e-3):
     
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
     
-    # Model
     model = RCPolicy().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.5)
@@ -151,18 +127,13 @@ def train_rcp(states, actions, costs, epochs=500, batch_size=32768, lr=1e-3):
         if (epoch + 1) % 50 == 0:
             print(f"  Epoch {epoch+1}: Loss = {avg_loss:.6f}")
     
-    # Save model
     model_path = os.path.join(current_dir, "model_rcp.pth")
     torch.save(model.state_dict(), model_path)
     print(f"[RCP] Model saved: {model_path}")
     
     return model
 
-# ==========================================
-# Validation
-# ==========================================
 def validate(model):
-    """Compare RCP (with target = SC*0.9) vs SC"""
     print(f"\n[RCP] Validation...")
     model.eval()
     sc = TimeAwareSC()
@@ -175,7 +146,6 @@ def validate(model):
     victories = 0
     
     for scenario in BENCHMARK_SCENARIOS:
-        # Run SC first to get baseline cost
         physics = BoilerPhysics()
         physics.reset()
         for task in scenario["tasks"]:
@@ -190,7 +160,6 @@ def validate(model):
         sc_cost = physics.total_cost
         total_sc += sc_cost
         
-        # Run RCP with target = SC * 0.9 (ask for 10% lower cost)
         target_cost = sc_cost * 0.9
         
         physics = BoilerPhysics()
@@ -241,15 +210,7 @@ def validate(model):
     
     return victories, total_rcp, total_sc
 
-# ==========================================
-# Main
-# ==========================================
 if __name__ == "__main__":
-    # 1. Collect Data
     states, actions, costs = collect_rcp_data(10000)
-    
-    # 2. Train RCP
     model = train_rcp(states, actions, costs, epochs=500)
-    
-    # 3. Validate
     validate(model)
